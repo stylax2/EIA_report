@@ -15,7 +15,7 @@ from .report_web.builder import write_report
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MASTER = ROOT / "datamaster" / "EIA_표준종목록_마스터DB_통합본_v7.xlsx"
-DEFAULT_SURVEY = ROOT / "datamaster" / "EIA_가상데이터_v7.xlsx"
+DEFAULT_SURVEY = ROOT / "datamaster" / "EIA_가상데이터_v8.xlsx"
 DEFAULT_OUT = Path(__file__).resolve().parents[1] / "output" / "analysis_report.html"
 
 
@@ -32,10 +32,11 @@ def main() -> None:
     out = write_report(results, args.out, str(args.master), str(args.survey),
                        fragment=args.fragment)
     total = sum(r.totals.total for r in results)
-    print(f"분류군 {len(results)}개 · 출현종 합계 {total:,}종")
+    scopes = sum(len(r.scopes) for r in results)
+    print(f"분류군 {len(results)}개 · 분석 단위 {scopes}개 · 출현종 합계 {total:,}종")
     for r in results:
-        t3 = f"{len(r.quantitative)}차수" if r.quantitative else "산출불가"
-        print(f"  {r.name:<14} {r.totals.total:>7,}종  T2 {len(r.specific)}항목  T3 {t3}")
+        st = f"정점 {r.spec.stations}" if r.spec.has_stations else "정점 없음"
+        print(f"  {r.name:<14} {r.totals.total:>7,}종  단위 {len(r.scopes):>2}개  {st}")
     print(f"\n{out}  ({out.stat().st_size / 1024 / 1024:.1f} MB)")
 
 

@@ -10,7 +10,14 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from ..data.schema import FIELD_COLUMNS, LITERATURE_COLUMNS, is_null_token
+from ..data.schema import (
+    FIELD_ROUNDS,
+    LITERATURE_COLUMNS,
+    columns_in,
+    is_null_token,
+    round_of,
+    split_columns,
+)
 from .taxon_specific import display_name
 
 # 마스터DB에 과명이 없는 종(조류 22건 등)의 표시값
@@ -27,14 +34,22 @@ class Totals:
     both: int  # 문헌·현지 공통
     literature_only: int  # 문헌 단독
     field_only: int  # 현지 단독(문헌 미기재 신규 확인종)
-    by_column: dict[str, int]  # 컬럼별 출현종수
+    by_column: dict[str, int]  # 컬럼별(정점 포함) 출현종수
+    by_round: dict[str, int]  # 현지조사 회차별 출현종수(정점 합집합)
     new_in_field_round2: int  # 현지 1차 미확인 → 2차 확인
 
 
 def summarize_totals(occurred: pd.DataFrame) -> Totals:
     lit = occurred["present_lit"]
     fld = occurred["present_field"]
-    r1, r2 = (f"present_{c}" for c in FIELD_COLUMNS)
+    columns = columns_in(occurred)
+    # 정점 분류군은 회차가 여러 컬럼으로 펼쳐지므로 회차 단위로 묶어 본다
+    rounds = {
+        r: occurred[[f"present_{c}" for c in columns if round_of(c) == r]].any(axis=1)
+        for r in FIELD_ROUNDS
+        if any(round_of(c) == r for c in columns)
+    }
+    first, second = (rounds.get(r) for r in FIELD_ROUNDS)
     return Totals(
         total=len(occurred),
         literature=int(lit.sum()),
@@ -42,9 +57,10 @@ def summarize_totals(occurred: pd.DataFrame) -> Totals:
         both=int((lit & fld).sum()),
         literature_only=int((lit & ~fld).sum()),
         field_only=int((~lit & fld).sum()),
-        by_column={c: int(occurred[f"present_{c}"].sum())
-                   for c in LITERATURE_COLUMNS + FIELD_COLUMNS},
-        new_in_field_round2=int((~occurred[r1] & occurred[r2]).sum()),
+        by_column={c: int(occurred[f"present_{c}"].sum()) for c in columns},
+        by_round={r: int(v.sum()) for r, v in rounds.items()},
+        new_in_field_round2=(int((~first & second).sum())
+                             if first is not None and second is not None else 0),
     )
 
 
@@ -85,8 +101,8 @@ class SpeciesRow:
 
 def build_species_rows(occurred: pd.DataFrame) -> list[SpeciesRow]:
     """종목록 표 데이터를 만든다. 과명·학명 순으로 정렬한다."""
-    cols = LITERATURE_COLUMNS + FIELD_COLUMNS
-    ind_cols = [f"ind_{c}" for c in FIELD_COLUMNS if f"ind_{c}" in occurred.columns]
+    cols = columns_in(occurred)
+    ind_cols = [f"ind_{c}" for c in cols if f"ind_{c}" in occurred.columns]
     rows: list[SpeciesRow] = []
     for _, r in occurred.iterrows():
         total_ind = None

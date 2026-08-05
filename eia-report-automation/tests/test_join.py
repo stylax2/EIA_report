@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from src.data.loader import _join_by_id, _join_by_position
+from src.data.schema import SURVEY_COLUMNS
 
 
 def master(ids=("A1", "A2", "A3")):
@@ -35,7 +36,7 @@ def survey(ids, lit1=None):
 def test_join_by_id_is_order_independent():
     # 조사자료를 뒤집어도 마스터 순서대로 값이 붙는다
     s = survey(["A3", "A2", "A1"], lit1=[1, None, None])
-    df, warnings = _join_by_id(master(), s, "테스트")
+    df, warnings = _join_by_id(master(), s, "테스트", SURVEY_COLUMNS)
     got = df["문헌1"]
     assert got.isna().tolist() == [True, True, False]  # A1·A2 미기록, A3 기록
     assert got.iloc[2] == 1
@@ -44,7 +45,7 @@ def test_join_by_id_is_order_independent():
 
 def test_join_by_id_allows_missing_rows():
     # 조사자료에서 행을 지우면 미출현으로 처리하고 경고만 남긴다
-    df, warnings = _join_by_id(master(), survey(["A1"]), "테스트")
+    df, warnings = _join_by_id(master(), survey(["A1"]), "테스트", SURVEY_COLUMNS)
     assert len(df) == 3
     assert df["문헌1"].isna().sum() == 2
     assert any("기록이 없는 종" in w for w in warnings)
@@ -53,17 +54,17 @@ def test_join_by_id_allows_missing_rows():
 def test_join_by_id_rejects_duplicate_ids():
     s = survey(["A1", "A1", "A2"])
     with pytest.raises(ValueError, match="중복"):
-        _join_by_id(master(), s, "테스트")
+        _join_by_id(master(), s, "테스트", SURVEY_COLUMNS)
 
 
 def test_join_by_id_rejects_unknown_id():
     s = survey(["A1", "A2", "Z9"])
     with pytest.raises(ValueError, match="마스터DB에 없는"):
-        _join_by_id(master(), s, "테스트")
+        _join_by_id(master(), s, "테스트", SURVEY_COLUMNS)
 
 
 def test_position_join_warns_about_missing_key():
-    df, warnings = _join_by_position(master(), survey(["A1", "A2", "A3"]), "테스트")
+    df, warnings = _join_by_position(master(), survey(["A1", "A2", "A3"]), "테스트", SURVEY_COLUMNS)
     assert any("species_id 가 없어" in w for w in warnings)
 
 
@@ -72,9 +73,9 @@ def test_position_join_detects_reordering():
     s = survey(["A1", "A2", "A3"])
     s.loc[0, "korean_name"] = "다"
     with pytest.raises(ValueError, match="어긋납니다"):
-        _join_by_position(master(), s, "테스트")
+        _join_by_position(master(), s, "테스트", SURVEY_COLUMNS)
 
 
 def test_position_join_detects_row_count_change():
     with pytest.raises(ValueError, match="행 수가 다릅니다"):
-        _join_by_position(master(), survey(["A1", "A2"]), "테스트")
+        _join_by_position(master(), survey(["A1", "A2"]), "테스트", SURVEY_COLUMNS)

@@ -1,12 +1,11 @@
-"""분석 결과 웹페이지 생성.
+"""분석 선택 웹페이지 생성.
 
-`TaxonResult` 를 정적 HTML 한 장으로 렌더링한다. 외부 자원을 참조하지
-않으므로 브라우저만 있으면 열린다.
+분석가가 자기 데이터시트를 놓고 **평가서에 넣을 표·그래프를 고르는** 화면을
+만든다. 분류군 → 분석 단위(회차·정점) → 분석항목을 고르면 결과와 그래프가
+나오고, 채택한 항목이 목록으로 모인다.
 
-이 페이지는 읽는 문서가 아니라 조판 전에 수치를 검수하는 도구다. 따라서
-산출 가능성 매트릭스를 최상단에 두어 "이 분류군이 무엇을 낼 수 있는가"가
-먼저 보이게 한다. 화면의 모든 수치는 `TaxonResult` 에서 오며 렌더링
-단계에서 다시 계산하지 않는다.
+외부 자원을 참조하지 않으므로 브라우저만 있으면 열린다. 화면은 사전 계산된
+값을 고르고 그릴 뿐 지수를 계산하지 않는다.
 """
 
 from __future__ import annotations
@@ -16,312 +15,14 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from ..analysis.item_catalog import (
-    LIMITED,
-    NONE,
-    OK,
-    ItemVerdict,
-    Verdict,
-    evaluate,
-    summarize,
-)
 from ..analysis.runner import TaxonResult
-from ..data.schema import FIELD_COLUMNS, LITERATURE_COLUMNS
+from .payload import build_payload
 
-SURVEY_COLS = LITERATURE_COLUMNS + FIELD_COLUMNS
-SPECIES_PAGE = 100  # 종목록 1회 렌더링 행 수
+SPECIES_PAGE = 100
 
 
 def _esc(text: object) -> str:
     return html.escape(str(text), quote=True)
-
-
-def _taxon_payload(r: TaxonResult) -> dict:
-    """종목록 데이터를 압축된 배열로 만든다. 행이 많아 키를 반복하지 않는다."""
-    rows = [
-        [
-            row.family,
-            row.scientific_name,
-            row.korean_name,
-            row.abb,
-            row.abb2,
-            "".join("1" if row.marks.get(c) else "0" for c in SURVEY_COLS),
-            row.individuals if row.individuals is not None else "",
-        ]
-        for row in r.species_rows
-    ]
-    return {"code": r.spec.code, "rows": rows}
-
-
-def _cards(r: TaxonResult) -> str:
-    t = r.totals
-    legal = r.legal
-    cards = [
-        ("총 출현종수", f"{t.total:,}", f"목록 {r.total_species_in_db:,}종 중", "accent"),
-        ("문헌조사", f"{t.literature:,}", f"단독 {t.literature_only:,}종", ""),
-        ("현지조사", f"{t.field_survey:,}", f"단독 {t.field_only:,}종", ""),
-        ("멸종위기야생생물", f"{legal.endangered_total:,}",
-         f"Ⅰ급 {len(legal.endangered_1)} · Ⅱ급 {len(legal.endangered_2)}",
-         "critical" if legal.endangered_total else ""),
-        ("천연기념물", f"{len(legal.natural_monument):,}", "", ""),
-        ("생태계교란생물", f"{len(legal.invasive):,}", "",
-         "warn" if legal.invasive else ""),
-    ]
-    out = []
-    for label, value, sub, tone in cards:
-        out.append(
-            f'<div class="card {tone}"><div class="card-label">{_esc(label)}</div>'
-            f'<div class="card-value">{_esc(value)}</div>'
-            f'<div class="card-sub">{_esc(sub)}</div></div>'
-        )
-    return f'<div class="cards">{"".join(out)}</div>'
-
-
-def _survey_table(r: TaxonResult) -> str:
-    t = r.totals
-    rows = "".join(
-        f"<tr><th>{_esc(c)}</th><td class='num'>{t.by_column[c]:,}</td></tr>"
-        for c in SURVEY_COLS
-    )
-    return f"""
-<div class="grid-2">
-  <section class="panel">
-    <h3>조사 회차별 출현종수</h3>
-    <table class="kv"><tbody>{rows}</tbody></table>
-  </section>
-  <section class="panel">
-    <h3>조사구분 대조</h3>
-    <table class="kv"><tbody>
-      <tr><th>문헌·현지 공통</th><td class="num">{t.both:,}</td></tr>
-      <tr><th>문헌 단독</th><td class="num">{t.literature_only:,}</td></tr>
-      <tr><th>현지 단독 <span class="hint">문헌 미기재</span></th><td class="num">{t.field_only:,}</td></tr>
-      <tr><th>현지 2차 신규 <span class="hint">1차 미확인</span></th><td class="num">{t.new_in_field_round2:,}</td></tr>
-    </tbody></table>
-  </section>
-</div>"""
-
-
-def _bars(title: str, items: list[tuple[str, int]], note: str = "") -> str:
-    if not items:
-        return ""
-    top = max(v for _, v in items) or 1
-    rows = "".join(
-        f'<div class="bar-row"><span class="bar-name">{_esc(k)}</span>'
-        f'<span class="bar-track"><span class="bar-fill" style="width:{v / top * 100:.1f}%"></span></span>'
-        f'<span class="bar-val">{v:,}</span></div>'
-        for k, v in items
-    )
-    hint = f'<p class="hint">{_esc(note)}</p>' if note else ""
-    return f'<section class="panel"><h3>{_esc(title)}</h3>{hint}<div class="bars">{rows}</div></section>'
-
-
-def _legal_lists(r: TaxonResult) -> str:
-    groups = [
-        ("멸종위기야생생물 Ⅰ급", r.legal.endangered_1, "critical"),
-        ("멸종위기야생생물 Ⅱ급", r.legal.endangered_2, "critical"),
-        ("천연기념물", r.legal.natural_monument, ""),
-        ("생태계교란생물", r.legal.invasive, "warn"),
-    ]
-    blocks = []
-    for title, items, tone in groups:
-        if not items:
-            blocks.append(
-                f'<div class="legal-group"><h4>{_esc(title)}</h4>'
-                f'<p class="empty">출현하지 않음</p></div>')
-            continue
-        chips = "".join(
-            f'<span class="chip {tone}">{_esc(s.korean_name)}'
-            f'<i>{_esc(s.scientific_name)}</i></span>' for s in items)
-        blocks.append(
-            f'<div class="legal-group"><h4>{_esc(title)} '
-            f'<span class="count">{len(items)}종</span></h4>'
-            f'<div class="chips">{chips}</div></div>')
-    local = r.legal.local_protected
-    if local:
-        blocks.append(
-            f'<div class="legal-group"><h4>시·도보호종 '
-            f'<span class="count">{len(local)}종</span></h4>'
-            f'<p class="hint">사업 대상지의 시·도에 해당하는 종만 골라 사용한다.</p>'
-            f'<div class="chips">'
-            + "".join(f'<span class="chip">{_esc(s.korean_name)}</span>' for s in local[:60])
-            + ("<span class='chip more'>…</span>" if len(local) > 60 else "")
-            + "</div></div>")
-    return f'<section class="panel"><h3>법정보호종 <span class="tier">T1-05·06·07</span></h3>{"".join(blocks)}</section>'
-
-
-def _specific(r: TaxonResult) -> str:
-    if not r.specific:
-        return ""
-    blocks = []
-    for item in r.specific:
-        bd = ""
-        if item.breakdown:
-            bd = '<div class="mini-bars">' + "".join(
-                f'<div class="mini-row"><span>{_esc(k)}</span>'
-                f'<span class="num">{v:,}</span></div>' for k, v in item.breakdown
-            ) + "</div>"
-        sp = ""
-        if item.species:
-            shown = item.species[:40]
-            sp = ('<div class="chips">'
-                  + "".join(f'<span class="chip">{_esc(s)}</span>' for s in shown)
-                  + (f'<span class="chip more">외 {len(item.species) - 40}종</span>'
-                     if len(item.species) > 40 else "")
-                  + "</div>")
-        note = f'<p class="note">{_esc(item.note)}</p>' if item.note else ""
-        blocks.append(
-            f'<div class="spec-item"><div class="spec-head">'
-            f'<h4>{_esc(item.name)}</h4><span class="spec-value">{_esc(item.value)}</span>'
-            f'</div>{note}{bd}{sp}</div>')
-    return (f'<section class="panel"><h3>분류군 특이 분석 <span class="tier">T2</span></h3>'
-            f'{"".join(blocks)}</section>')
-
-
-def _quantitative(r: TaxonResult) -> str:
-    if not r.quantitative:
-        reason = r.quantitative_unavailable or "산출할 수 없습니다."
-        return (f'<section class="panel unavailable"><h3>군집 분석 <span class="tier">T3</span></h3>'
-                f'<div class="na"><strong>자료 없음</strong><p>{_esc(reason)}</p>'
-                f'<p class="hint">개체수가 없으면 우점도·다양도·균등도·풍부도를 낼 수 없다. '
-                f'0으로 채우지 않고 산출 불가로 표기한다.</p></div></section>')
-    head = "".join(f"<th>{_esc(q.label)}</th>" for q in r.quantitative)
-    def row(label, fmt, hint=""):
-        cells = "".join(f'<td class="num">{fmt(q)}</td>' for q in r.quantitative)
-        h = f' <span class="hint">{hint}</span>' if hint else ""
-        return f"<tr><th>{label}{h}</th>{cells}</tr>"
-    body = "".join([
-        row("종수 S", lambda q: f"{q.species_count:,}"),
-        row("개체수 N", lambda q: f"{q.individuals:,}"),
-        row("우점도 DI", lambda q: f"{q.dominance:.3f}"),
-        row("다양도 H&#39;", lambda q: f"{q.diversity:.3f}"),
-        row("균등도 J&#39;", lambda q: f"{q.evenness:.3f}"),
-        row("풍부도 R1", lambda q: f"{q.richness:.3f}"),
-        row("우점종", lambda q: _esc(q.dominant_species)),
-        row("아우점종", lambda q: _esc(q.subdominant_species)),
-    ])
-    tops = []
-    for q in r.quantitative:
-        items = "".join(
-            f'<div class="mini-row"><span>{i}. {_esc(n)}</span>'
-            f'<span class="num">{c:,} <em>{ra:.1f}%</em></span></div>'
-            for i, (n, c, ra) in enumerate(q.dominant, 1))
-        tops.append(f'<div class="top-block"><h4>{_esc(q.label)} 우점 상위</h4>'
-                    f'<div class="mini-bars">{items}</div></div>')
-    return f"""
-<section class="panel">
-  <h3>군집 분석 <span class="tier">T3</span></h3>
-  <p class="hint">지수는 조사차수별로 각각 산출한다. 차수를 합산하면 조사 시기가 다른 자료를 섞게 된다.</p>
-  <div class="scroll-x"><table class="matrix"><thead><tr><th></th>{head}</tr></thead>
-  <tbody>{body}</tbody></table></div>
-  <div class="grid-2">{"".join(tops)}</div>
-</section>"""
-
-
-def _species_section(r: TaxonResult) -> str:
-    cols = "".join(f"<th>{_esc(c)}</th>" for c in SURVEY_COLS)
-    ind = "<th>개체수</th>" if r.spec.has_individuals else ""
-    return f"""
-<section class="panel">
-  <h3>종목록 <span class="tier">T1-08</span></h3>
-  <div class="tools">
-    <input type="search" class="search" data-taxon="{r.spec.code}"
-           placeholder="국명 · 학명 · 과명 검색" aria-label="종 검색">
-    <span class="result-count" data-count="{r.spec.code}"></span>
-  </div>
-  <div class="scroll-x">
-    <table class="species" data-table="{r.spec.code}">
-      <thead><tr><th>과명</th><th>학명</th><th>국명</th><th>법정지위</th>{cols}{ind}</tr></thead>
-      <tbody></tbody>
-    </table>
-  </div>
-  <button class="more" data-more="{r.spec.code}" hidden>더 보기</button>
-</section>"""
-
-
-def _notes(r: TaxonResult) -> str:
-    if not r.notes:
-        return ""
-    items = "".join(f"<li>{_esc(n)}</li>" for n in r.notes)
-    return (f'<section class="panel warn-panel"><h3>자료 확인 사항</h3>'
-            f'<ul class="notes">{items}</ul></section>')
-
-
-def _matrix(results: list[TaxonResult]) -> str:
-    rows = []
-    for r in results:
-        t3 = ('<span class="ok">산출</span>' if r.quantitative
-              else f'<span class="no" title="{_esc(r.quantitative_unavailable or "")}">불가</span>')
-        t2 = (", ".join(i.name for i in r.specific)) or "—"
-        field_kind = {"count": "개체수", "method": "조사방법 코드", "presence": "출현 여부"}[
-            r.spec.field_value]
-        rows.append(
-            f'<tr><th><a href="#{r.spec.code}">{_esc(r.name)}</a></th>'
-            f'<td class="num">{r.totals.total:,}</td>'
-            f'<td>{_esc(field_kind)}</td>'
-            f'<td><span class="ok">산출</span></td>'
-            f'<td class="t2">{_esc(t2)}</td>'
-            f'<td>{t3}</td></tr>')
-    return f"""
-<section class="panel" id="overview">
-  <h3>산출 가능성 매트릭스</h3>
-  <p class="hint">분석항목은 업체 양식이 아니라 원자료가 지지하는 범위로 정한다.
-     개체수를 기록한 분류군에서만 T3 군집지수를 낼 수 있다.</p>
-  <div class="scroll-x">
-    <table class="matrix">
-      <thead><tr><th>분류군</th><th>출현종수</th><th>현지조사 기록 방식</th>
-        <th>T1 공통</th><th>T2 분류군 특이</th><th>T3 군집지수</th></tr></thead>
-      <tbody>{"".join(rows)}</tbody>
-    </table>
-  </div>
-</section>"""
-
-
-def _item_matrix(results: list[TaxonResult]) -> str:
-    """분석항목별 표·그래프 산출 가능성.
-
-    판정은 `analysis/item_catalog.py` 가 TaxonResult 에서 파생시킨다.
-    화면에서 다시 계산하지 않으므로 문서와 어긋나지 않는다.
-    """
-    verdicts = evaluate(results)
-    counts = summarize(results)
-    order = {r.name: i for i, r in enumerate(results)}
-
-    by_item: dict[tuple[str, str], list[ItemVerdict]] = {}
-    for v in verdicts:
-        by_item.setdefault((v.tier, v.item), []).append(v)
-
-    def cell(v: Verdict) -> str:
-        tone = {OK: "m-ok", LIMITED: "m-lim", NONE: "m-no"}[v.mark]
-        return f'<span class="{tone}" title="{_esc(v.reason)}">{v.mark}</span>'
-
-    blocks = []
-    for (tier, item), group in by_item.items():
-        group.sort(key=lambda v: order.get(v.taxon, 99))
-        scope = ("전 분류군" if len(group) == len(results)
-                 else f"{len(group)}개 분류군")
-        chips = "".join(
-            f'<span class="verdict"><span class="v-taxon">{_esc(v.taxon)}</span>'
-            f'{cell(v.table)}{cell(v.graph)}</span>' for v in group)
-        blocks.append(
-            f'<div class="item-row">'
-            f'<div class="item-head"><span class="tier">{tier}</span>'
-            f'<span class="item-name">{_esc(item)}</span>'
-            f'<span class="item-scope">{_esc(scope)}</span></div>'
-            f'<div class="verdicts">{chips}</div></div>')
-
-    legend = (f'<p class="hint">각 항목마다 분류군별로 <b>표 · 그래프</b> 순서로 판정한다. '
-              f'기호에 마우스를 올리면 근거가 나온다. '
-              f'판정 {len(verdicts)}건 중 그래프 '
-              f'<span class="m-ok">○</span> 가능 {counts["그래프"][OK]} · '
-              f'<span class="m-lim">△</span> 제한 {counts["그래프"][LIMITED]} · '
-              f'<span class="m-no">✗</span> 불가 {counts["그래프"][NONE]}</p>')
-
-    return f"""
-<section class="panel" id="items">
-  <h3>분석항목 적용 매트릭스</h3>
-  {legend}
-  <div class="item-list">{"".join(blocks)}</div>
-</section>"""
 
 
 CSS = """
@@ -369,350 +70,527 @@ body{
   margin:0; background:var(--paper); color:var(--ink);
   font-family:"Pretendard","Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",
               system-ui,-apple-system,sans-serif;
-  font-size:15px; line-height:1.6;
-  -webkit-font-smoothing:antialiased;
+  font-size:15px; line-height:1.6; -webkit-font-smoothing:antialiased;
 }
-.mono,.num,td.num,.card-value,.bar-val{
-  font-family:"SFMono-Regular",Menlo,Consolas,"D2Coding",monospace;
-  font-variant-numeric:tabular-nums;
-}
-i,em.sci,.chip i{font-style:italic}
+.num,td.num,.card-value{font-family:"SFMono-Regular",Menlo,Consolas,monospace;
+  font-variant-numeric:tabular-nums}
 
-/* ── 헤더 ── */
-header.top{
-  border-bottom:1px solid var(--line); background:var(--surface);
-  padding:26px clamp(16px,4vw,40px);
-}
-.top-inner{max-width:1180px;margin:0 auto;display:flex;flex-wrap:wrap;
-  gap:18px;align-items:flex-end;justify-content:space-between}
-h1{font-size:1.5rem;margin:0 0 6px;letter-spacing:-.01em;text-wrap:balance}
+header.top{border-bottom:1px solid var(--line);background:var(--surface);
+  padding:22px clamp(16px,4vw,40px)}
+.top-inner{max-width:1240px;margin:0 auto;display:flex;flex-wrap:wrap;
+  gap:16px;align-items:flex-end;justify-content:space-between}
+h1{font-size:1.42rem;margin:0 0 5px;letter-spacing:-.01em;text-wrap:balance}
 .eyebrow{font-size:.7rem;letter-spacing:.14em;text-transform:uppercase;
-  color:var(--moss);font-weight:600;margin:0 0 8px}
-.meta{font-size:.8rem;color:var(--ink-3);margin:0;line-height:1.8}
-.meta code{background:var(--surface-2);padding:1px 6px;border-radius:3px;
-  font-size:.95em;color:var(--ink-2)}
-.banner{
-  background:var(--warn-soft);border:1px solid var(--warn);
-  color:var(--warn);border-radius:4px;padding:9px 14px;
-  font-size:.8rem;font-weight:600;
-}
+  color:var(--moss);font-weight:600;margin:0 0 7px}
+.meta{font-size:.78rem;color:var(--ink-3);margin:0;line-height:1.75}
+.meta code{background:var(--surface-2);padding:1px 6px;border-radius:3px;color:var(--ink-2)}
+.banner{background:var(--warn-soft);border:1px solid var(--warn);color:var(--warn);
+  border-radius:4px;padding:8px 13px;font-size:.78rem;font-weight:600}
 
-/* ── 레이아웃 ── */
-.shell{max-width:1180px;margin:0 auto;display:grid;
-  grid-template-columns:210px minmax(0,1fr);gap:30px;
-  padding:30px clamp(16px,4vw,40px) 80px}
-@media (max-width:860px){.shell{grid-template-columns:1fr;gap:18px}}
+.shell{max-width:1240px;margin:0 auto;display:grid;
+  grid-template-columns:196px minmax(0,1fr);gap:26px;
+  padding:24px clamp(16px,4vw,40px) 70px}
+@media (max-width:900px){.shell{grid-template-columns:1fr;gap:16px}}
 
-nav.rail{position:sticky;top:20px;align-self:start}
-@media (max-width:860px){nav.rail{position:static}}
-.rail-title{font-size:.68rem;letter-spacing:.13em;text-transform:uppercase;
-  color:var(--ink-3);font-weight:700;margin:0 0 10px;padding-left:10px}
+nav.rail{position:sticky;top:18px;align-self:start}
+@media (max-width:900px){nav.rail{position:static}}
+.rail-title{font-size:.67rem;letter-spacing:.13em;text-transform:uppercase;
+  color:var(--ink-3);font-weight:700;margin:0 0 9px;padding-left:10px}
 .rail ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:1px}
-@media (max-width:860px){.rail ul{flex-direction:row;flex-wrap:wrap;gap:6px}}
-.rail button{
-  width:100%;display:flex;justify-content:space-between;align-items:center;gap:8px;
-  background:none;border:0;border-left:2px solid transparent;
-  padding:8px 10px;font:inherit;font-size:.86rem;color:var(--ink-2);
-  cursor:pointer;text-align:left;border-radius:0 3px 3px 0;
-}
+@media (max-width:900px){.rail ul{flex-direction:row;flex-wrap:wrap;gap:5px}}
+.rail button{width:100%;display:flex;justify-content:space-between;align-items:center;
+  gap:8px;background:none;border:0;border-left:2px solid transparent;padding:8px 10px;
+  font:inherit;font-size:.85rem;color:var(--ink-2);cursor:pointer;text-align:left;
+  border-radius:0 3px 3px 0}
 .rail button:hover{background:var(--surface);color:var(--ink)}
-.rail button[aria-current="true"]{
-  background:var(--moss-soft);border-left-color:var(--moss);
+.rail button[aria-current="true"]{background:var(--moss-soft);border-left-color:var(--moss);
   color:var(--moss);font-weight:700}
-.rail .badge{font-size:.74rem;color:var(--ink-3);
-  font-family:"SFMono-Regular",Menlo,monospace;font-variant-numeric:tabular-nums}
+.rail .badge{font-size:.73rem;color:var(--ink-3);font-family:Menlo,monospace;
+  font-variant-numeric:tabular-nums}
 .rail button[aria-current="true"] .badge{color:var(--moss)}
-.rail button:focus-visible{outline:2px solid var(--moss);outline-offset:-2px}
+button:focus-visible,input:focus-visible{outline:2px solid var(--moss);outline-offset:2px}
 
-main{min-width:0;display:flex;flex-direction:column;gap:22px}
-.taxon-panel[hidden]{display:none}
-.taxon-panel{display:flex;flex-direction:column;gap:18px}
-.taxon-head h2{font-size:1.24rem;margin:0 0 4px;letter-spacing:-.01em}
-.taxon-head p{margin:0;font-size:.82rem;color:var(--ink-3)}
+main{min-width:0;display:flex;flex-direction:column;gap:18px}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:5px;
+  padding:18px 20px}
+.panel h3{font-size:.92rem;margin:0 0 12px;display:flex;align-items:center;gap:9px}
+.panel h4{font-size:.82rem;margin:0 0 7px;color:var(--ink-2)}
+.hint{font-size:.77rem;color:var(--ink-3);margin:0 0 11px;line-height:1.65}
+.tier{font-size:.63rem;letter-spacing:.08em;font-weight:700;background:var(--surface-2);
+  color:var(--ink-3);padding:2px 6px;border-radius:3px;font-family:Menlo,monospace}
 
-/* ── 패널 ── */
-.panel{background:var(--surface);border:1px solid var(--line);
-  border-radius:5px;padding:20px 22px}
-.panel h3{font-size:.94rem;margin:0 0 14px;display:flex;align-items:center;
-  gap:9px;letter-spacing:-.005em}
-.panel h4{font-size:.84rem;margin:0 0 8px;color:var(--ink-2)}
-.tier{font-size:.64rem;letter-spacing:.09em;font-weight:700;
-  background:var(--surface-2);color:var(--ink-3);
-  padding:2px 7px;border-radius:3px;font-family:Menlo,monospace}
-.hint{font-size:.78rem;color:var(--ink-3);margin:0 0 12px;line-height:1.65}
-.note{font-size:.78rem;color:var(--moss);margin:0 0 10px}
-.grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px}
+/* 분석 단위 */
+.scope-groups{display:flex;flex-direction:column;gap:9px}
+.scope-group{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
+.scope-kind{font-size:.7rem;color:var(--ink-3);font-weight:700;min-width:52px}
+.scope-chips{display:flex;flex-wrap:wrap;gap:5px}
+.scope-chip{background:var(--surface-2);border:1px solid transparent;border-radius:3px;
+  padding:4px 10px;font:inherit;font-size:.79rem;color:var(--ink-2);cursor:pointer}
+.scope-chip:hover{border-color:var(--moss);color:var(--moss)}
+.scope-chip[aria-pressed="true"]{background:var(--moss);color:#fff;font-weight:700}
+:root[data-theme="dark"] .scope-chip[aria-pressed="true"],
+@media (prefers-color-scheme:dark){.scope-chip[aria-pressed="true"]{color:#101614}}
+.scope-chip .n{opacity:.7;margin-left:5px;font-family:Menlo,monospace}
 
-/* ── 카드 ── */
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:10px}
-.card{background:var(--surface);border:1px solid var(--line);
-  border-radius:5px;padding:14px 16px;border-top:2px solid var(--line)}
-.card.accent{border-top-color:var(--moss)}
-.card.critical{border-top-color:var(--critical)}
-.card.warn{border-top-color:var(--warn)}
-.card-label{font-size:.72rem;color:var(--ink-3);font-weight:600;
-  letter-spacing:.02em;margin-bottom:5px}
-.card-value{font-size:1.6rem;font-weight:700;line-height:1.15;letter-spacing:-.02em}
-.card.critical .card-value{color:var(--critical)}
-.card.warn .card-value{color:var(--warn)}
-.card-sub{font-size:.72rem;color:var(--ink-3);margin-top:3px;min-height:1em}
+/* 항목 체크리스트 */
+.item-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:6px}
+.item-check{display:flex;align-items:flex-start;gap:8px;padding:7px 9px;
+  border:1px solid var(--line-2);border-radius:4px;cursor:pointer;background:var(--surface)}
+.item-check:hover{border-color:var(--moss)}
+.item-check.off{opacity:.5;cursor:not-allowed;background:var(--surface-2)}
+.item-check input{margin-top:3px;accent-color:var(--moss)}
+.item-check .body{min-width:0;flex:1}
+.item-check .nm{font-size:.81rem;font-weight:600;display:block}
+.item-check .rs{font-size:.71rem;color:var(--ink-3);display:block;margin-top:1px}
+.marks{font-size:.73rem;font-family:Menlo,monospace;white-space:nowrap}
+.m-ok{color:var(--moss);font-weight:700}
+.m-lim{color:var(--warn);font-weight:700}
+.m-no{color:var(--muted);font-weight:700}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:11px}
+.btn{padding:5px 12px;border:1px solid var(--line);border-radius:4px;background:var(--surface);
+  color:var(--ink-2);font:inherit;font-size:.78rem;cursor:pointer}
+.btn:hover{border-color:var(--moss);color:var(--moss)}
 
-/* ── 표 ── */
-table{border-collapse:collapse;width:100%;font-size:.84rem}
+/* 결과 카드 */
+.result{background:var(--surface);border:1px solid var(--line);border-radius:5px;
+  padding:16px 18px;display:flex;flex-direction:column;gap:12px}
+.result-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.result-head h3{margin:0;font-size:.94rem}
+.result-head .spacer{flex:1}
+.adopt{display:flex;align-items:center;gap:6px;font-size:.77rem;color:var(--ink-2);
+  cursor:pointer;white-space:nowrap}
+.adopt input{accent-color:var(--moss)}
+.block{display:flex;flex-direction:column;gap:7px}
+.block-note{font-size:.75rem;color:var(--ink-3)}
+.empty{font-size:.8rem;color:var(--ink-3);margin:0}
+.na{background:var(--surface-2);border-radius:4px;padding:13px 15px}
+.na strong{display:block;color:var(--muted);font-size:.85rem;margin-bottom:4px}
+.na p{margin:0;font-size:.79rem;color:var(--ink-2)}
+
+table{border-collapse:collapse;width:100%;font-size:.82rem}
 .scroll-x{overflow-x:auto}
-.kv th{text-align:left;font-weight:500;color:var(--ink-2);
-  padding:7px 0;border-bottom:1px solid var(--line-2)}
-.kv td{text-align:right;padding:7px 0;border-bottom:1px solid var(--line-2);font-weight:600}
+.kv th{text-align:left;font-weight:500;color:var(--ink-2);padding:6px 0;
+  border-bottom:1px solid var(--line-2)}
+.kv td{text-align:right;padding:6px 0;border-bottom:1px solid var(--line-2);font-weight:600}
 .kv tr:last-child th,.kv tr:last-child td{border-bottom:0}
-.matrix th,.matrix td{padding:8px 12px;border-bottom:1px solid var(--line-2);
-  text-align:left;vertical-align:middle}
-.matrix thead th{font-size:.74rem;color:var(--ink-3);font-weight:700;
-  border-bottom:1px solid var(--line);white-space:nowrap}
-.matrix tbody th{font-weight:600;white-space:nowrap}
-.matrix td.num,.matrix .num{text-align:right;font-weight:600}
-.matrix td.t2{font-size:.78rem;color:var(--ink-2);min-width:200px}
-.matrix a{color:var(--moss);text-decoration:none;font-weight:700}
-.matrix a:hover{text-decoration:underline}
-.ok{color:var(--moss);font-weight:700;font-size:.78rem}
-.no{color:var(--muted);font-weight:700;font-size:.78rem;cursor:help;
-  border-bottom:1px dotted var(--muted)}
-.species th,.species td{padding:6px 10px;border-bottom:1px solid var(--line-2);
-  text-align:left;white-space:nowrap}
-.species thead th{font-size:.74rem;color:var(--ink-3);position:sticky;top:0;
+.grid th,.grid td{padding:6px 10px;border-bottom:1px solid var(--line-2);text-align:left;
+  white-space:nowrap}
+.grid thead th{font-size:.73rem;color:var(--ink-3);border-bottom:1px solid var(--line)}
+.grid td.num,.grid th.num{text-align:right}
+.species th,.species td{padding:5px 9px;border-bottom:1px solid var(--line-2);
+  text-align:left;white-space:nowrap;font-size:.79rem}
+.species thead th{font-size:.72rem;color:var(--ink-3);position:sticky;top:0;
   background:var(--surface);border-bottom:1px solid var(--line)}
 .species .sci{font-style:italic;color:var(--ink-2)}
+.species .abb{font-weight:700;color:var(--critical);font-size:.73rem}
 .species .mark{text-align:center;color:var(--moss);font-weight:700}
 .species .dash{text-align:center;color:var(--line)}
-.species td.num{text-align:right}
-.species .abb{font-size:.74rem;font-weight:700;color:var(--critical)}
+.tools{display:flex;gap:10px;align-items:center;margin-bottom:9px;flex-wrap:wrap}
+.search{flex:1;min-width:180px;padding:6px 10px;border:1px solid var(--line);
+  border-radius:4px;background:var(--paper);color:var(--ink);font:inherit;font-size:.82rem}
+.result-count{font-size:.76rem;color:var(--ink-3);font-family:Menlo,monospace}
 
-/* ── 항목 매트릭스 ── */
-.item-list{display:flex;flex-direction:column}
-.item-row{padding:11px 0;border-bottom:1px solid var(--line-2)}
-.item-row:last-child{border-bottom:0}
-.item-row:first-child{padding-top:0}
-.item-head{display:flex;align-items:center;gap:9px;margin-bottom:7px;flex-wrap:wrap}
-.item-name{font-size:.86rem;font-weight:600}
-.item-scope{font-size:.73rem;color:var(--ink-3)}
-.verdicts{display:flex;flex-wrap:wrap;gap:5px}
-.verdict{display:inline-flex;align-items:center;gap:4px;
-  background:var(--surface-2);border-radius:3px;padding:3px 8px;font-size:.76rem}
-.v-taxon{color:var(--ink-3)}
-.m-ok{color:var(--moss);font-weight:700;cursor:help}
-.m-lim{color:var(--warn);font-weight:700;cursor:help}
-.m-no{color:var(--muted);font-weight:700;cursor:help}
-.hint b{color:var(--ink-2)}
+svg.chart{display:block;width:100%;height:auto;overflow:visible}
+svg.chart text{fill:var(--ink-2);font-size:11px;
+  font-family:"Pretendard","Apple SD Gothic Neo",system-ui,sans-serif}
+svg.chart text.val{fill:var(--ink-3);font-family:Menlo,monospace}
+svg.chart .bar{fill:var(--moss)}
+svg.chart .grid{stroke:var(--line-2);stroke-width:1}
+svg.chart .seg-0{fill:var(--muted)}
+svg.chart .seg-1{fill:var(--moss)}
+svg.chart .seg-2{fill:var(--warn)}
+svg.chart .cell-label{font-size:10px}
 
-/* ── 막대 ── */
-.bars{display:flex;flex-direction:column;gap:5px}
-.bar-row{display:grid;grid-template-columns:132px minmax(0,1fr) 52px;
-  gap:10px;align-items:center;font-size:.8rem}
-.bar-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink-2)}
-.bar-track{background:var(--surface-2);border-radius:2px;height:11px;overflow:hidden}
-.bar-fill{display:block;height:100%;background:var(--moss);border-radius:2px}
-.bar-val{text-align:right;font-size:.78rem;font-weight:600;color:var(--ink-2)}
-
-.mini-bars{display:flex;flex-direction:column;gap:1px;margin-top:8px}
-.mini-row{display:flex;justify-content:space-between;gap:12px;
-  padding:5px 0;border-bottom:1px solid var(--line-2);font-size:.81rem}
-.mini-row:last-child{border-bottom:0}
-.mini-row .num{font-weight:600}
-.mini-row em{font-style:normal;color:var(--ink-3);font-size:.9em;margin-left:4px}
-
-/* ── 칩 ── */
 .chips{display:flex;flex-wrap:wrap;gap:5px}
-.chip{display:inline-flex;align-items:baseline;gap:5px;
-  background:var(--surface-2);border-radius:3px;padding:3px 8px;font-size:.78rem}
-.chip i{font-size:.9em;color:var(--ink-3)}
+.chip{display:inline-flex;align-items:baseline;gap:4px;background:var(--surface-2);
+  border-radius:3px;padding:3px 8px;font-size:.77rem}
 .chip.critical{background:var(--critical-soft);color:var(--critical);font-weight:600}
-.chip.critical i{color:var(--critical);opacity:.75}
 .chip.warn{background:var(--warn-soft);color:var(--warn);font-weight:600}
-.chip.warn i{color:var(--warn);opacity:.75}
 .chip.more{background:none;color:var(--ink-3);border:1px dashed var(--line)}
-.legal-group{padding:12px 0;border-bottom:1px solid var(--line-2)}
-.legal-group:last-child{border-bottom:0;padding-bottom:0}
-.legal-group:first-child{padding-top:0}
-.count{font-size:.74rem;color:var(--moss);font-weight:700}
-.empty{font-size:.79rem;color:var(--ink-3);margin:0}
+.chip-group{padding:9px 0;border-bottom:1px solid var(--line-2)}
+.chip-group:last-child{border-bottom:0;padding-bottom:0}
+.chip-group:first-child{padding-top:0}
+.count{font-size:.73rem;color:var(--moss);font-weight:700}
 
-/* ── 산출 불가 ── */
-.unavailable{border-style:dashed}
-.na{background:var(--surface-2);border-radius:4px;padding:16px 18px}
-.na strong{display:block;color:var(--muted);font-size:.88rem;margin-bottom:5px}
-.na p{margin:0 0 6px;font-size:.81rem;color:var(--ink-2)}
-.na .hint{margin:0}
+/* 채택 목록 */
+.adopted-list{display:flex;flex-direction:column;gap:3px;margin-bottom:11px}
+.adopted-row{display:flex;align-items:center;gap:9px;padding:6px 0;
+  border-bottom:1px solid var(--line-2);font-size:.8rem}
+.adopted-row:last-child{border-bottom:0}
+.adopted-row .где{color:var(--ink-3);font-size:.75rem}
+.adopted-row .rm{margin-left:auto;background:none;border:0;color:var(--ink-3);
+  cursor:pointer;font:inherit;font-size:.75rem;padding:2px 6px;border-radius:3px}
+.adopted-row .rm:hover{color:var(--critical);background:var(--critical-soft)}
+.copy-area{width:100%;min-height:96px;padding:9px 11px;border:1px solid var(--line);
+  border-radius:4px;background:var(--paper);color:var(--ink-2);font-size:.77rem;
+  font-family:Menlo,monospace;resize:vertical}
 
-.spec-item{padding:14px 0;border-bottom:1px solid var(--line-2)}
-.spec-item:last-child{border-bottom:0;padding-bottom:0}
-.spec-item:first-child{padding-top:0}
-.spec-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
-.spec-head h4{margin:0}
-.spec-value{font-weight:700;color:var(--moss);
-  font-family:Menlo,monospace;font-variant-numeric:tabular-nums;font-size:.9rem}
-
-.warn-panel{border-color:var(--warn)}
-.notes{margin:0;padding-left:18px;font-size:.82rem;color:var(--ink-2)}
-.notes li{margin-bottom:4px}
-
-/* ── 도구 ── */
-.tools{display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
-.search{flex:1;min-width:200px;padding:7px 11px;border:1px solid var(--line);
-  border-radius:4px;background:var(--paper);color:var(--ink);font:inherit;font-size:.84rem}
-.search:focus{outline:2px solid var(--moss);outline-offset:-1px;border-color:var(--moss)}
-.result-count{font-size:.78rem;color:var(--ink-3);
-  font-family:Menlo,monospace;font-variant-numeric:tabular-nums}
-.more{margin-top:12px;padding:7px 16px;border:1px solid var(--line);
-  border-radius:4px;background:var(--surface);color:var(--ink-2);
-  font:inherit;font-size:.82rem;cursor:pointer}
-.more:hover{border-color:var(--moss);color:var(--moss)}
-.more:focus-visible{outline:2px solid var(--moss);outline-offset:2px}
-
-footer{border-top:1px solid var(--line);padding:22px clamp(16px,4vw,40px);
-  font-size:.78rem;color:var(--ink-3)}
-footer .inner{max-width:1180px;margin:0 auto}
+footer{border-top:1px solid var(--line);padding:20px clamp(16px,4vw,40px);
+  font-size:.77rem;color:var(--ink-3)}
+footer .inner{max-width:1240px;margin:0 auto}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 """
 
 
-JS = """
+JS = r"""
 (function(){
-  var DATA = window.__TAXA__, PAGE = %(page)d, COLS = %(ncols)d;
-  var state = {};
+  var D = window.__DATA__, CFG = window.__CFG__;
+  var state = {taxon:null, scope:null, items:new Set(), adopted:new Map(), species:{}};
+  var $ = function(s,r){return (r||document).querySelector(s);};
 
-  function esc(s){var d=document.createElement('span');d.textContent=s;return d.innerHTML;}
+  function esc(s){var d=document.createElement('span');d.textContent=s==null?'':s;return d.innerHTML;}
+  function num(v){return typeof v==='number'?v.toLocaleString():esc(v);}
+  function el(tag,cls,html){var e=document.createElement(tag);if(cls)e.className=cls;
+    if(html!=null)e.innerHTML=html;return e;}
+  function markCls(m){return m===CFG.OK?'m-ok':(m===CFG.LIMITED?'m-lim':'m-no');}
 
-  function rowHtml(r, hasInd){
-    var marks='';
-    for(var i=0;i<COLS;i++){
-      marks += r[5][i]==='1' ? '<td class="mark">●</td>' : '<td class="dash">·</td>';
+  /* ── SVG 차트 ───────────────────────────────────────────────── */
+  var SVGNS='http://www.w3.org/2000/svg';
+  function svgEl(tag,attrs){var e=document.createElementNS(SVGNS,tag);
+    for(var k in attrs) e.setAttribute(k,attrs[k]); return e;}
+
+  function barChart(items, unit){
+    var W=760, LABEL=160, VALUE=74, ROW=25, PAD=6;
+    var barArea = W-LABEL-VALUE;
+    var H = items.length*ROW + PAD*2;
+    var max = 0; items.forEach(function(it){ if(it[1]>max) max=it[1]; });
+    if(max<=0) max=1;
+    var svg = svgEl('svg',{'class':'chart',viewBox:'0 0 '+W+' '+H,
+      role:'img','aria-label':'막대 그래프'});
+    items.forEach(function(it,i){
+      var y = PAD + i*ROW;
+      var w = Math.max(1, it[1]/max*barArea);
+      var label = svgEl('text',{x:LABEL-9,y:y+16,'text-anchor':'end'});
+      label.textContent = it[0].length>18 ? it[0].slice(0,17)+'…' : it[0];
+      svg.appendChild(label);
+      svg.appendChild(svgEl('rect',{'class':'bar',x:LABEL,y:y+5,width:w,height:ROW-11,rx:2}));
+      var val = svgEl('text',{'class':'val',x:LABEL+barArea+8,y:y+16});
+      val.textContent = it[1].toLocaleString()+(unit?' '+unit:'');
+      svg.appendChild(val);
+    });
+    return svg;
+  }
+
+  function stackedBar(segments, total){
+    var W=760, H=62, PAD=4, BAR=26;
+    var sum = segments.reduce(function(a,s){return a+s[1];},0) || 1;
+    var svg = svgEl('svg',{'class':'chart',viewBox:'0 0 '+W+' '+H,
+      role:'img','aria-label':'누적 막대'});
+    var x=0;
+    segments.forEach(function(s,i){
+      var w = s[1]/sum*W;
+      svg.appendChild(svgEl('rect',{'class':'seg-'+(i%3),x:x,y:PAD,width:Math.max(0,w),
+        height:BAR,rx:2}));
+      if(w>52){
+        var t=svgEl('text',{x:x+w/2,y:PAD+18,'text-anchor':'middle'});
+        t.setAttribute('fill','var(--paper)'); t.textContent=s[1].toLocaleString();
+        svg.appendChild(t);
+      }
+      var lg=svgEl('text',{x:x,y:H-6});
+      lg.textContent=s[0]+' '+s[1].toLocaleString();
+      svg.appendChild(lg);
+      x+=w;
+    });
+    return svg;
+  }
+
+  function heatmap(labels, values){
+    var CELL=54, LEFT=52, TOP=22, W=LEFT+labels.length*CELL, H=TOP+labels.length*CELL;
+    var svg=svgEl('svg',{'class':'chart',viewBox:'0 0 '+W+' '+H,
+      role:'img','aria-label':'지점간 유사도 히트맵'});
+    // 격자는 정사각이라 컨테이너 폭까지 늘리면 셀이 지나치게 커진다
+    svg.style.maxWidth = W+'px';
+    labels.forEach(function(l,i){
+      var t=svgEl('text',{x:LEFT+i*CELL+CELL/2,y:14,'text-anchor':'middle'});
+      t.textContent=l; svg.appendChild(t);
+      var t2=svgEl('text',{x:LEFT-8,y:TOP+i*CELL+CELL/2+4,'text-anchor':'end'});
+      t2.textContent=l; svg.appendChild(t2);
+    });
+    for(var i=0;i<labels.length;i++){
+      for(var j=0;j<labels.length;j++){
+        var v=values[i][j];
+        var r=svgEl('rect',{x:LEFT+j*CELL,y:TOP+i*CELL,width:CELL-2,height:CELL-2,rx:2});
+        r.setAttribute('fill','var(--moss)');
+        r.setAttribute('fill-opacity', (0.10+0.85*v).toFixed(3));
+        svg.appendChild(r);
+        var t=svgEl('text',{'class':'cell-label',x:LEFT+j*CELL+(CELL-2)/2,
+          y:TOP+i*CELL+CELL/2+4,'text-anchor':'middle'});
+        t.setAttribute('fill', v>0.55 ? 'var(--paper)' : 'var(--ink-2)');
+        t.textContent=v.toFixed(2);
+        svg.appendChild(t);
+      }
     }
-    return '<tr><td>'+esc(r[0])+'</td>'
-      +'<td class="sci">'+esc(r[1])+'</td>'
-      +'<td>'+esc(r[2])+'</td>'
-      +'<td class="abb">'+esc(r[3]||'')+'</td>'
-      + marks
-      + (hasInd ? '<td class="num">'+(r[6]===''?'':Number(r[6]).toLocaleString())+'</td>' : '')
-      +'</tr>';
+    return svg;
   }
 
-  function render(code){
-    var st=state[code], tbody=document.querySelector('[data-table="'+code+'"] tbody');
-    var slice=st.filtered.slice(0, st.shown);
-    var html='';
-    for(var i=0;i<slice.length;i++){ html+=rowHtml(slice[i], st.hasInd); }
-    tbody.innerHTML=html;
-    document.querySelector('[data-count="'+code+'"]').textContent =
-      st.filtered.length.toLocaleString()+'종 중 '+slice.length.toLocaleString()+'종 표시';
-    var btn=document.querySelector('[data-more="'+code+'"]');
-    btn.hidden = st.shown >= st.filtered.length;
+  /* ── 블록 렌더러 ────────────────────────────────────────────── */
+  function renderBlock(b, taxon, scope){
+    var wrap = el('div','block');
+    if(b.note) wrap.appendChild(el('p','block-note',esc(b.note)));
+
+    if(b.kind==='kv'){
+      var rows=b.rows.map(function(r){
+        return '<tr><th>'+esc(r[0])+'</th><td class="num">'+num(r[1])+'</td></tr>';}).join('');
+      wrap.appendChild(el('table','kv','<tbody>'+rows+'</tbody>'));
+    }
+    else if(b.kind==='bars'){
+      wrap.appendChild(barChart(b.items, b.unit==='종'?'':b.unit));
+      if(b.truncated) wrap.appendChild(el('p','block-note','외 '+b.truncated+'개 생략'));
+    }
+    else if(b.kind==='stacked'){
+      wrap.appendChild(stackedBar(b.segments, b.total));
+    }
+    else if(b.kind==='matrix'){
+      var head='<tr>'+b.columns.map(function(c,i){
+        return '<th'+(i?' class="num"':'')+'>'+esc(c)+'</th>';}).join('')+'</tr>';
+      var body=b.rows.map(function(r){
+        return '<tr>'+r.map(function(c,i){
+          return i? '<td class="num">'+num(c)+'</td>' : '<th>'+esc(c)+'</th>';
+        }).join('')+'</tr>';}).join('');
+      var d=el('div','scroll-x');
+      d.appendChild(el('table','grid','<thead>'+head+'</thead><tbody>'+body+'</tbody>'));
+      wrap.appendChild(d);
+    }
+    else if(b.kind==='heatmap'){
+      wrap.appendChild(heatmap(b.labels,b.values));
+    }
+    else if(b.kind==='chips'){
+      b.groups.forEach(function(g){
+        var box=el('div','chip-group');
+        box.appendChild(el('h4',null,esc(g.title)+' <span class="count">'+g.count+'종</span>'));
+        if(!g.items.length){ box.appendChild(el('p','empty','해당 없음')); }
+        else{
+          var cs=g.items.map(function(s){
+            return '<span class="chip '+(g.tone||'')+'">'+esc(s)+'</span>';}).join('');
+          if(g.count>g.items.length) cs+='<span class="chip more">외 '+(g.count-g.items.length)+'종</span>';
+          box.appendChild(el('div','chips',cs));
+        }
+        wrap.appendChild(box);
+      });
+    }
+    else if(b.kind==='species'){
+      wrap.appendChild(speciesTable(taxon,scope));
+    }
+    return wrap;
   }
 
-  function initTaxon(code){
-    var d=DATA[code];
-    state[code]={rows:d.rows, filtered:d.rows, shown:Math.min(PAGE,d.rows.length),
-                 hasInd:d.hasInd};
-    render(code);
-    var input=document.querySelector('[data-taxon="'+code+'"]');
+  /* ── 종목록 (단위로 선별) ───────────────────────────────────── */
+  function speciesTable(taxon, scope){
+    var T=D[taxon], idx=scope.columns.map(function(c){return T.columns.indexOf(c);})
+      .filter(function(i){return i>=0;});
+    var rows=T.species.filter(function(r){
+      return idx.some(function(i){return r[4][i]==='1';});
+    });
+    var box=el('div');
+    var tools=el('div','tools');
+    var input=el('input','search'); input.type='search';
+    input.placeholder='국명 · 학명 · 과명 검색'; input.setAttribute('aria-label','종 검색');
+    var count=el('span','result-count');
+    tools.appendChild(input); tools.appendChild(count); box.appendChild(tools);
+
+    var scroll=el('div','scroll-x');
+    var head='<tr><th>과명</th><th>학명</th><th>국명</th><th>법정지위</th>'+
+      scope.columns.map(function(c){return '<th>'+esc(c)+'</th>';}).join('')+'</tr>';
+    var table=el('table','species','<thead>'+head+'</thead><tbody></tbody>');
+    scroll.appendChild(table); box.appendChild(scroll);
+    var more=el('button','btn','더 보기'); more.type='button'; box.appendChild(more);
+
+    var shown=Math.min(CFG.PAGE, rows.length), filtered=rows;
+    function draw(){
+      var slice=filtered.slice(0,shown);
+      table.querySelector('tbody').innerHTML = slice.map(function(r){
+        var marks=idx.map(function(i){
+          return r[4][i]==='1' ? '<td class="mark">●</td>' : '<td class="dash">·</td>';}).join('');
+        return '<tr><td>'+esc(r[0])+'</td><td class="sci">'+esc(r[1])+'</td><td>'+esc(r[2])+
+          '</td><td class="abb">'+esc(r[3]||'')+'</td>'+marks+'</tr>';
+      }).join('');
+      count.textContent=filtered.length.toLocaleString()+'종 중 '+slice.length.toLocaleString()+'종 표시';
+      more.hidden = shown>=filtered.length;
+    }
     var timer;
-    input.addEventListener('input', function(){
+    input.addEventListener('input',function(){
       clearTimeout(timer);
       timer=setTimeout(function(){
-        var q=input.value.trim().toLowerCase(), st=state[code];
-        st.filtered = q ? st.rows.filter(function(r){
-          return (r[0]+' '+r[1]+' '+r[2]).toLowerCase().indexOf(q)>=0;
-        }) : st.rows;
-        st.shown=Math.min(PAGE, st.filtered.length);
-        render(code);
+        var q=input.value.trim().toLowerCase();
+        filtered = q ? rows.filter(function(r){
+          return (r[0]+' '+r[1]+' '+r[2]).toLowerCase().indexOf(q)>=0;}) : rows;
+        shown=Math.min(CFG.PAGE,filtered.length); draw();
       },140);
     });
-    document.querySelector('[data-more="'+code+'"]').addEventListener('click',function(){
-      state[code].shown=Math.min(state[code].shown+PAGE*5, state[code].filtered.length);
-      render(code);
+    more.addEventListener('click',function(){
+      shown=Math.min(shown+CFG.PAGE*5, filtered.length); draw();});
+    draw();
+    return box;
+  }
+
+  /* ── 화면 구성 ─────────────────────────────────────────────── */
+  function currentScope(){
+    var T=D[state.taxon];
+    return T.scopes.filter(function(s){return s.key===state.scope;})[0] || T.scopes[0];
+  }
+
+  function renderRail(){
+    var ul=$('#rail-list'); ul.innerHTML='';
+    Object.keys(D).forEach(function(code){
+      var T=D[code];
+      var li=el('li');
+      var b=el('button',null,'<span>'+esc(T.label)+'</span><span class="badge">'+
+        T.scopes.filter(function(s){return s.key==='all';})[0].total.toLocaleString()+'</span>');
+      b.type='button';
+      b.setAttribute('aria-current', String(code===state.taxon));
+      b.addEventListener('click',function(){
+        state.taxon=code; state.scope='all'; state.items=new Set(); renderAll();});
+      li.appendChild(b); ul.appendChild(li);
     });
   }
 
-  function show(code){
-    document.querySelectorAll('.taxon-panel').forEach(function(p){
-      p.hidden = (p.id !== code);
+  function renderScopes(){
+    var T=D[state.taxon], box=$('#scopes'); box.innerHTML='';
+    var order=['문헌','정점','회차','종합'], groups={};
+    T.scopes.forEach(function(s){ (groups[s.kind]=groups[s.kind]||[]).push(s); });
+    order.forEach(function(kind){
+      if(!groups[kind]) return;
+      var g=el('div','scope-group');
+      g.appendChild(el('span','scope-kind',kind));
+      var chips=el('div','scope-chips');
+      groups[kind].forEach(function(s){
+        var b=el('button','scope-chip',esc(s.label)+'<span class="n">'+s.total.toLocaleString()+'</span>');
+        b.type='button';
+        b.setAttribute('aria-pressed', String(s.key===state.scope));
+        b.addEventListener('click',function(){ state.scope=s.key; renderScopes(); renderItems(); renderResults();});
+        chips.appendChild(b);
+      });
+      g.appendChild(chips); box.appendChild(g);
     });
-    document.querySelectorAll('.rail button').forEach(function(b){
-      b.setAttribute('aria-current', String(b.dataset.go===code));
-    });
-    if(!state[code] && DATA[code]) initTaxon(code);
-    if(history.replaceState) history.replaceState(null,'','#'+code);
   }
 
-  document.querySelectorAll('.rail button').forEach(function(b){
-    b.addEventListener('click',function(){show(b.dataset.go);});
-  });
-  document.querySelectorAll('.matrix a[href^="#"]').forEach(function(a){
-    a.addEventListener('click',function(e){e.preventDefault();
-      show(a.getAttribute('href').slice(1));
-      window.scrollTo({top:0,behavior:'smooth'});});
+  function renderItems(){
+    var sc=currentScope(), box=$('#items'); box.innerHTML='';
+    sc.items.forEach(function(it){
+      var usable = it.table[0]!==CFG.NONE;
+      var lab=el('label','item-check'+(usable?'':' off'));
+      var cb=el('input'); cb.type='checkbox'; cb.disabled=!usable;
+      cb.checked = usable && state.items.has(it.code);
+      cb.addEventListener('change',function(){
+        if(cb.checked) state.items.add(it.code); else state.items.delete(it.code);
+        renderResults();
+      });
+      lab.appendChild(cb);
+      var body=el('div','body',
+        '<span class="nm">'+esc(it.name)+'</span>'+
+        '<span class="rs">'+esc(usable?it.table[1]:it.table[1])+'</span>');
+      lab.appendChild(body);
+      lab.appendChild(el('span','marks',
+        '<span class="'+markCls(it.table[0])+'" title="표">'+it.table[0]+'</span>'+
+        '<span class="'+markCls(it.graph[0])+'" title="그래프: '+esc(it.graph[1])+'">'+it.graph[0]+'</span>'));
+      box.appendChild(lab);
+    });
+    var n=sc.items.filter(function(i){return i.table[0]!==CFG.NONE;}).length;
+    $('#item-summary').textContent = sc.items.length+'개 항목 중 '+n+'개 산출 가능';
+  }
+
+  function renderResults(){
+    var sc=currentScope(), box=$('#results'); box.innerHTML='';
+    var picked=sc.items.filter(function(i){return state.items.has(i.code);});
+    if(!picked.length){
+      box.appendChild(el('div','panel','<p class="empty">위에서 분석항목을 고르면 결과가 여기에 나옵니다.</p>'));
+      return;
+    }
+    picked.forEach(function(it){
+      var card=el('div','result');
+      var head=el('div','result-head',
+        '<span class="tier">'+esc(it.tier)+'</span><h3>'+esc(it.name)+'</h3>'+
+        '<span class="marks"><span class="'+markCls(it.table[0])+'">'+it.table[0]+'</span>'+
+        '<span class="'+markCls(it.graph[0])+'">'+it.graph[0]+'</span></span><span class="spacer"></span>');
+      var key=state.taxon+'|'+state.scope+'|'+it.code;
+      var lab=el('label','adopt');
+      var cb=el('input'); cb.type='checkbox'; cb.checked=state.adopted.has(key);
+      cb.addEventListener('change',function(){
+        if(cb.checked) state.adopted.set(key,{taxon:D[state.taxon].label,scope:sc.label,
+          code:it.code,name:it.name,table:it.table[0],graph:it.graph[0]});
+        else state.adopted.delete(key);
+        renderAdopted();
+      });
+      lab.appendChild(cb); lab.appendChild(document.createTextNode('평가서 반영'));
+      head.appendChild(lab); card.appendChild(head);
+
+      if(!it.blocks.length){
+        card.appendChild(el('div','na','<strong>산출 불가</strong><p>'+esc(it.table[1])+'</p>'));
+      } else {
+        it.blocks.forEach(function(b){ card.appendChild(renderBlock(b,state.taxon,sc)); });
+      }
+      box.appendChild(card);
+    });
+  }
+
+  function renderAdopted(){
+    var box=$('#adopted'), list=el('div','adopted-list');
+    box.innerHTML='';
+    if(!state.adopted.size){
+      box.appendChild(el('p','empty','항목 카드의 "평가서 반영"을 체크하면 여기에 모입니다.'));
+      $('#copy').value='';
+      $('#adopted-count').textContent='0건';
+      return;
+    }
+    var lines=[];
+    state.adopted.forEach(function(v,k){
+      var row=el('div','adopted-row',
+        '<span class="tier">'+esc(v.code)+'</span><strong>'+esc(v.name)+'</strong>'+
+        '<span class="где">'+esc(v.taxon)+' · '+esc(v.scope)+'</span>'+
+        '<span class="marks"><span class="'+markCls(v.table)+'">'+v.table+'</span>'+
+        '<span class="'+markCls(v.graph)+'">'+v.graph+'</span></span>');
+      var rm=el('button','rm','제거'); rm.type='button';
+      rm.addEventListener('click',function(){ state.adopted.delete(k); renderAdopted(); renderResults();});
+      row.appendChild(rm); list.appendChild(row);
+      lines.push([v.taxon,v.scope,v.code,v.name,
+        '표 '+v.table,'그래프 '+v.graph].join('\t'));
+    });
+    box.appendChild(list);
+    $('#copy').value='분류군\t분석단위\t코드\t항목\t표\t그래프\n'+lines.join('\n');
+    $('#adopted-count').textContent=state.adopted.size+'건';
+  }
+
+  function renderAll(){ renderRail(); renderScopes(); renderItems(); renderResults(); }
+
+  /* 기본 선택 */
+  $('#pick-all').addEventListener('click',function(){
+    currentScope().items.forEach(function(i){ if(i.table[0]!==CFG.NONE) state.items.add(i.code);});
+    renderItems(); renderResults();});
+  $('#pick-none').addEventListener('click',function(){
+    state.items=new Set(); renderItems(); renderResults();});
+  $('#pick-graph').addEventListener('click',function(){
+    state.items=new Set();
+    currentScope().items.forEach(function(i){ if(i.graph[0]===CFG.OK) state.items.add(i.code);});
+    renderItems(); renderResults();});
+  $('#copy-btn').addEventListener('click',function(){
+    var ta=$('#copy'); ta.select();
+    if(navigator.clipboard) navigator.clipboard.writeText(ta.value);
+    else document.execCommand('copy');
+    var b=$('#copy-btn'); b.textContent='복사됨'; setTimeout(function(){b.textContent='복사';},1400);
   });
 
-  var initial=(location.hash||'').slice(1);
-  show(DATA[initial] ? initial : 'overview-panel');
+  state.taxon=Object.keys(D)[0]; state.scope='all';
+  renderAll(); renderAdopted();
 })();
 """
 
 
 def build_body(results: list[TaxonResult], master_path: str, survey_path: str) -> str:
-    """`<body>` 안에 들어갈 내용만 만든다(style·script 포함).
-
-    자체 완결형 HTML(`build_html`)과 문서 골격 없이 삽입하는 경우
-    (아티팩트 게시 등) 모두 이 결과를 쓴다.
-    """
-    payload = {}
-    for r in results:
-        d = _taxon_payload(r)
-        payload[r.spec.code] = {"rows": d["rows"], "hasInd": r.spec.has_individuals}
-
-    rail = "".join(
-        f'<li><button type="button" data-go="{r.spec.code}">'
-        f'<span>{_esc(r.name)}</span><span class="badge">{r.totals.total:,}</span>'
-        f'</button></li>' for r in results)
-
-    panels = [
-        f'<section class="taxon-panel" id="overview-panel">'
-        f'<div class="taxon-head"><h2>전체 개요</h2>'
-        f'<p>8개 분류군의 출현종수와 분석항목 산출 가능 범위</p></div>'
-        f'{_matrix(results)}'
-        f'{_bars("분류군별 출현종수", [(r.name, r.totals.total) for r in results])}'
-        f'{_item_matrix(results)}'
-        f'</section>'
-    ]
-    for r in results:
-        panels.append(f"""
-<section class="taxon-panel" id="{r.spec.code}" hidden>
-  <div class="taxon-head">
-    <h2>{_esc(r.name)}</h2>
-    <p>표준종목록 {r.total_species_in_db:,}종 대조 · 현지조사 기록 방식:
-       {_esc({"count": "개체수", "method": "조사방법 코드", "presence": "출현 여부"}[r.spec.field_value])}</p>
-  </div>
-  {_cards(r)}
-  {_survey_table(r)}
-  {_bars("과별 출현종수 상위", r.taxonomy.by_family,
-         f"총 {r.taxonomy.family_count:,}과 / {r.taxonomy.order_count:,}목")}
-  {_legal_lists(r)}
-  {_specific(r)}
-  {_quantitative(r)}
-  {_species_section(r)}
-  {_notes(r)}
-</section>""")
-
-    js = JS % {"page": SPECIES_PAGE, "ncols": len(SURVEY_COLS)}
+    """`<body>` 안에 들어갈 내용만 만든다(style·script 포함)."""
+    payload = build_payload(results)
     generated = datetime.now().strftime("%Y-%m-%d %H:%M")
+    cfg = {"OK": "○", "LIMITED": "△", "NONE": "✗", "PAGE": SPECIES_PAGE}
 
     return f"""<style>{CSS}</style>
 <header class="top">
   <div class="top-inner">
     <div>
       <p class="eyebrow">환경영향평가 동·식물상</p>
-      <h1>생태조사 분석 결과 검수</h1>
+      <h1>분석항목 선택 작업대</h1>
       <p class="meta">
-        마스터DB <code>{_esc(Path(master_path).name)}</code><br>
-        조사자료 <code>{_esc(Path(survey_path).name)}</code> · 생성 {generated}
+        마스터DB <code>{_esc(Path(master_path).name)}</code> ·
+        조사자료 <code>{_esc(Path(survey_path).name)}</code><br>
+        분류군을 고르고 분석 단위를 정한 뒤, 평가서에 넣을 항목을 선택하십시오. · 생성 {generated}
       </p>
     </div>
     <div class="banner">파일럿 가상데이터 — 실제 조사 결과 아님</div>
@@ -722,22 +600,48 @@ def build_body(results: list[TaxonResult], master_path: str, survey_path: str) -
 <div class="shell">
   <nav class="rail" aria-label="분류군">
     <p class="rail-title">분류군</p>
-    <ul>
-      <li><button type="button" data-go="overview-panel">
-        <span>전체 개요</span><span class="badge">8</span></button></li>
-      {rail}
-    </ul>
+    <ul id="rail-list"></ul>
   </nav>
-  <main>{"".join(panels)}</main>
+  <main>
+    <section class="panel">
+      <h3>분석 단위</h3>
+      <p class="hint">평가서에 실을 표·그래프의 범위를 정합니다.
+         정점조사를 하는 분류군은 정점 단위까지 고를 수 있습니다.</p>
+      <div class="scope-groups" id="scopes"></div>
+    </section>
+
+    <section class="panel">
+      <h3>분석항목 <span class="tier" id="item-summary"></span></h3>
+      <p class="hint">각 항목의 두 기호는 <b>표 · 그래프</b> 순서입니다.
+         고른 단위가 지지하지 않는 항목은 사유와 함께 비활성으로 표시되며 선택할 수 없습니다.</p>
+      <div class="toolbar">
+        <button class="btn" type="button" id="pick-all">산출 가능한 항목 전체</button>
+        <button class="btn" type="button" id="pick-graph">그래프 가능한 항목만</button>
+        <button class="btn" type="button" id="pick-none">선택 해제</button>
+      </div>
+      <div class="item-grid" id="items"></div>
+    </section>
+
+    <div id="results"></div>
+
+    <section class="panel">
+      <h3>채택 목록 <span class="tier" id="adopted-count">0건</span></h3>
+      <p class="hint">평가서에 넣기로 한 항목입니다. 아래 텍스트를 복사해 작성 계획에 쓰십시오.</p>
+      <div id="adopted"></div>
+      <div class="toolbar"><button class="btn" type="button" id="copy-btn">복사</button></div>
+      <textarea class="copy-area" id="copy" readonly aria-label="채택 목록 복사용"></textarea>
+    </section>
+  </main>
 </div>
 
 <footer><div class="inner">
-  화면의 모든 수치는 Python 분석 계층이 확정한 값이다. 이 페이지는 다시 계산하지 않는다.
-  산출할 수 없는 항목은 0으로 채우지 않고 사유와 함께 표시한다.
+  화면의 모든 수치는 Python 분석 계층이 확정한 값입니다. 이 페이지는 다시 계산하지 않습니다.
+  산출할 수 없는 항목은 0으로 채우지 않고 사유와 함께 표시합니다.
 </div></footer>
 
-<script>window.__TAXA__={json.dumps(payload, ensure_ascii=False, separators=(",", ":"))};</script>
-<script>{js}</script>"""
+<script>window.__CFG__={json.dumps(cfg, ensure_ascii=False)};
+window.__DATA__={json.dumps(payload, ensure_ascii=False, separators=(",", ":"))};</script>
+<script>{JS}</script>"""
 
 
 def build_html(results: list[TaxonResult], master_path: str, survey_path: str) -> str:
@@ -748,7 +652,7 @@ def build_html(results: list[TaxonResult], master_path: str, survey_path: str) -
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>생태조사 분석 결과 검수</title>
+<title>분석항목 선택 작업대</title>
 </head>
 <body>
 {body}

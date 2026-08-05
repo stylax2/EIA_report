@@ -51,14 +51,22 @@ def test_item_codes_are_unique():
 
 
 def test_tiers_are_known():
-    assert {i.tier for i in ITEMS} <= {"T1", "T2", "T3"}
+    # S 는 정점(Station) 항목
+    assert {i.tier for i in ITEMS} <= {"T1", "T2", "T3", "S"}
 
 
-def test_t3_items_limited_to_count_taxa():
-    # 개체수를 기록하는 분류군에만 T3 를 걸어야 한다
+def test_t3_items_apply_to_all_taxa():
+    # 군집지수는 어느 분류군에서든 요구될 수 있다. 낼 수 없는 분류군에도
+    # 항목을 남겨 두고 사유를 보여준다.
     for item in ITEMS:
         if item.tier == "T3":
-            assert item.taxa == ("조류", "어류", "저서성대형무척추동물")
+            assert item.taxa is None
+
+
+def test_station_items_limited_to_station_taxa():
+    for item in ITEMS:
+        if item.tier == "S":
+            assert item.taxa == ("어류", "저서성대형무척추동물")
 
 
 def test_t1_items_apply_to_all_taxa():

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from ..data.schema import FIELD_COLUMNS, MAMMAL_METHODS, is_null_token, normalize_grade
+from ..data.schema import MAMMAL_METHODS, columns_in, is_null_token, normalize_grade
 
 # 마스터DB에 국명이 없는 종(어류 2건)은 학명으로 표시한다
 MISSING_KOREAN_NAME = "[국명없음]"
@@ -106,7 +106,7 @@ def analyze_benthos(occurred: pd.DataFrame) -> list[SpecificItem]:
     if "saprobic_index_Qi" not in occurred.columns:
         return []
     qi = pd.to_numeric(occurred["saprobic_index_Qi"], errors="coerce")
-    ind_cols = [f"ind_{c}" for c in FIELD_COLUMNS if f"ind_{c}" in occurred.columns]
+    ind_cols = [f"ind_{c}" for c in columns_in(occurred) if f"ind_{c}" in occurred.columns]
     if not ind_cols:
         return []
     counts = occurred[ind_cols].apply(pd.to_numeric, errors="coerce").sum(axis=1)
@@ -175,7 +175,7 @@ def analyze_plants(occurred: pd.DataFrame) -> list[SpecificItem]:
 
 def analyze_mammals(occurred: pd.DataFrame) -> list[SpecificItem]:
     """조사방법별 확인종수. 한 종이 여러 방법으로 확인되면 중복 계수된다."""
-    cols = [f"method_{c}" for c in FIELD_COLUMNS if f"method_{c}" in occurred.columns]
+    cols = [f"method_{c}" for c in columns_in(occurred) if f"method_{c}" in occurred.columns]
     if not cols:
         return []
     tally: dict[str, int] = {}

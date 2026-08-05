@@ -17,6 +17,8 @@ from .schema import (
     COUNT,
     FIELD_COLUMNS,
     LITERATURE_COLUMNS,
+    split_columns,
+    survey_columns,
     MAMMAL_METHODS,
     METHOD,
     SURVEY_COLUMNS,
@@ -93,7 +95,8 @@ def _presence_columns(df: pd.DataFrame, spec: TaxonSpec) -> tuple[pd.DataFrame, 
     warnings: list[str] = []
     unknown: set[str] = set()
 
-    for col in SURVEY_COLUMNS:
+    columns = survey_columns(spec)
+    for col in columns:
         is_lit = col in LITERATURE_COLUMNS
         parsed = [parse_survey_value(v, spec.field_value, is_lit) for v in df[col]]
         df[f"present_{col}"] = [p.present for p in parsed]
@@ -104,16 +107,16 @@ def _presence_columns(df: pd.DataFrame, spec: TaxonSpec) -> tuple[pd.DataFrame, 
         for p in parsed:
             unknown.update(p.unknown_tokens)
 
-    present_cols = [f"present_{c}" for c in SURVEY_COLUMNS]
-    df["present_any"] = df[present_cols].any(axis=1)
-    df["present_lit"] = df[[f"present_{c}" for c in LITERATURE_COLUMNS]].any(axis=1)
-    df["present_field"] = df[[f"present_{c}" for c in FIELD_COLUMNS]].any(axis=1)
+    lit_cols, fld_cols = split_columns(columns)
+    df["present_any"] = df[[f"present_{c}" for c in columns]].any(axis=1)
+    df["present_lit"] = df[[f"present_{c}" for c in lit_cols]].any(axis=1)
+    df["present_field"] = df[[f"present_{c}" for c in fld_cols]].any(axis=1)
 
     if unknown:
         warnings.append(f"해석하지 못한 출현값: {', '.join(sorted(unknown))}")
 
     if spec.field_value == COUNT:
-        ind_cols = [f"ind_{c}" for c in FIELD_COLUMNS]
+        ind_cols = [f"ind_{c}" for c in fld_cols]
         counts = df[ind_cols].apply(pd.to_numeric, errors="coerce")
         nonpositive = int((counts <= 0).sum().sum())
         if nonpositive:
@@ -121,8 +124,8 @@ def _presence_columns(df: pd.DataFrame, spec: TaxonSpec) -> tuple[pd.DataFrame, 
     return df, warnings
 
 
-def _join_by_id(df: pd.DataFrame, survey: pd.DataFrame, taxon: str
-                ) -> tuple[pd.DataFrame, list[str]]:
+def _join_by_id(df: pd.DataFrame, survey: pd.DataFrame, taxon: str,
+                columns: list[str]) -> tuple[pd.DataFrame, list[str]]:
     """species_id 로 조인한다(v7 이후). 행 순서·행 수와 무관하다."""
     warnings: list[str] = []
     ids = df["species_id"].map(normalize_text)
@@ -147,13 +150,13 @@ def _join_by_id(df: pd.DataFrame, survey: pd.DataFrame, taxon: str
     if missing:
         warnings.append(f"조사자료에 기록이 없는 종 {missing}건 — 미출현으로 처리")
 
-    for col in SURVEY_COLUMNS:
+    for col in columns:
         df[col] = ids.map(lookup[col]) if col in lookup.columns else None
     return df, warnings
 
 
-def _join_by_position(df: pd.DataFrame, survey: pd.DataFrame, taxon: str
-                      ) -> tuple[pd.DataFrame, list[str]]:
+def _join_by_position(df: pd.DataFrame, survey: pd.DataFrame, taxon: str,
+                      columns: list[str]) -> tuple[pd.DataFrame, list[str]]:
     """행 위치로 조인한다(v6 이하). 국명·학명으로 어긋남을 잡는다."""
     warnings = ["조사자료에 species_id 가 없어 행 위치로 조인했습니다. v7 이상을 쓰십시오."]
     if len(df) != len(survey):
@@ -172,7 +175,7 @@ def _join_by_position(df: pd.DataFrame, survey: pd.DataFrame, taxon: str
                 f"마스터DB '{left.iloc[first]}' vs 조사자료 '{right.iloc[first]}'. "
                 "조사자료의 행 순서를 바꾸지 마십시오."
             )
-    for col in SURVEY_COLUMNS:
+    for col in columns:
         df[col] = survey[col].values
     return df, warnings
 
@@ -196,9 +199,9 @@ def load_taxon(
         df[key] = df[key].map(normalize_text)
 
     if "species_id" in master.columns and "species_id" in survey.columns:
-        df, warnings = _join_by_id(df, survey, spec.name)
+        df, warnings = _join_by_id(df, survey, spec.name, survey_columns(spec))
     else:
-        df, warnings = _join_by_position(df, survey, spec.name)
+        df, warnings = _join_by_position(df, survey, spec.name, survey_columns(spec))
 
     df, parse_warnings = _presence_columns(df, spec)
     warnings += parse_warnings

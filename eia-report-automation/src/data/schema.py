@@ -10,10 +10,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 LITERATURE_COLUMNS = ["문헌1", "문헌2"]
-FIELD_COLUMNS = ["현지조사1", "현지조사2"]
+FIELD_ROUNDS = ["현지조사1", "현지조사2"]
+
+# 정점조사를 하지 않는 분류군의 현지조사 컬럼. 정점 분류군은
+# `field_columns(spec)` 가 회차 × 정점으로 펼쳐 준다.
+FIELD_COLUMNS = list(FIELD_ROUNDS)
 SURVEY_COLUMNS = LITERATURE_COLUMNS + FIELD_COLUMNS
 
 INPUT_COLUMNS = ["family_kr", "scientific_name", "korean_name", "abb", "abb2"]
+
+# 정점 컬럼 이름 규칙: 현지조사1_St1 … 표기는 화면에서 'St.1' 로 바꾼다.
+STATION_SEPARATOR = "_St"
 
 # 포유류 현지조사 방법 약어 (가상데이터 범례 시트)
 MAMMAL_METHODS = {
@@ -38,6 +45,12 @@ class TaxonSpec:
     name: str  # 시트명이자 보고서 표기명
     field_value: str  # PRESENCE | COUNT | METHOD
     specific_items: tuple[str, ...] = ()  # T2 분류군 특이 항목
+    stations: int = 0  # 정점조사 정점 수. 0 이면 정점 구분 없음
+
+    @property
+    def has_stations(self) -> bool:
+        """정점조사를 하는가. 지점별 분석 가능 여부와 같다."""
+        return self.stations > 0
 
     @property
     def has_individuals(self) -> bool:
@@ -61,8 +74,9 @@ TAXON_SPECS: tuple[TaxonSpec, ...] = (
     TaxonSpec("amphibians", "양서류", PRESENCE),
     TaxonSpec("reptiles", "파충류", PRESENCE),
     TaxonSpec("insects", "육상곤충류", PRESENCE, ("고유종",)),
-    TaxonSpec("fish", "어류", COUNT, ("고유종", "외래종")),
-    TaxonSpec("benthos", "저서성대형무척추동물", COUNT, ("오수생물지수",)),
+    # 어류·저서성대형무척추동물은 정점조사를 한다
+    TaxonSpec("fish", "어류", COUNT, ("고유종", "외래종"), stations=5),
+    TaxonSpec("benthos", "저서성대형무척추동물", COUNT, ("오수생물지수",), stations=5),
 )
 
 SPEC_BY_NAME = {s.name: s for s in TAXON_SPECS}
@@ -103,6 +117,63 @@ def normalize_grade(value: object) -> str:
     text = str(value).strip()
     core = text.removeprefix("멸").removesuffix("급").strip()
     return ROMAN_ALIASES.get(core.upper(), text)
+
+
+def station_label(index: int) -> str:
+    """정점 번호를 평가서 표기로. 1 → 'St.1'"""
+    return f"St.{index}"
+
+
+def station_columns(spec: TaxonSpec, round_name: str) -> list[str]:
+    """현지조사 회차 하나의 컬럼 목록.
+
+    정점 분류군은 회차가 정점 수만큼 펼쳐지고, 아니면 회차 자체가 컬럼이다.
+    """
+    if not spec.has_stations:
+        return [round_name]
+    return [f"{round_name}{STATION_SEPARATOR}{i}" for i in range(1, spec.stations + 1)]
+
+
+def field_columns(spec: TaxonSpec) -> list[str]:
+    """현지조사 컬럼 전체."""
+    return [c for r in FIELD_ROUNDS for c in station_columns(spec, r)]
+
+
+def survey_columns(spec: TaxonSpec) -> list[str]:
+    """분류군의 출현 컬럼 전체. 문헌조사는 정점 개념이 없다."""
+    return LITERATURE_COLUMNS + field_columns(spec)
+
+
+# 로더가 붙이는 집계 플래그. 개별 출현 컬럼과 구분해야 한다.
+DERIVED_FLAGS = {"present_any", "present_lit", "present_field"}
+
+
+def columns_in(df) -> list[str]:
+    """DataFrame 에 실제로 실린 출현 컬럼 목록.
+
+    정점 유무에 따라 컬럼이 달라지므로 상수 대신 자료에서 읽는다.
+    """
+    return [c[len("present_"):] for c in df.columns
+            if c.startswith("present_") and c not in DERIVED_FLAGS]
+
+
+def split_columns(columns: list[str]) -> tuple[list[str], list[str]]:
+    """출현 컬럼을 (문헌, 현지)로 나눈다."""
+    lit = [c for c in columns if c in LITERATURE_COLUMNS]
+    return lit, [c for c in columns if c not in LITERATURE_COLUMNS]
+
+
+def round_of(column: str) -> str:
+    """컬럼이 속한 조사 회차. 정점 컬럼이면 정점 부분을 뗀다."""
+    return parse_station(column)[0]
+
+
+def parse_station(column: str) -> tuple[str, int | None]:
+    """컬럼명을 (회차, 정점번호)로 나눈다. 정점이 없으면 번호는 None."""
+    if STATION_SEPARATOR not in column:
+        return column, None
+    round_name, _, index = column.partition(STATION_SEPARATOR)
+    return round_name, int(index) if index.isdigit() else None
 
 
 def get_spec(taxon: str) -> TaxonSpec:

@@ -1,8 +1,11 @@
 """분석항목 카탈로그와 표·그래프 산출 가능성 판정.
 
 `docs/analysis_items_by_taxon.md` 의 판정표를 코드로 옮긴 것이다. 문서와
-화면이 어긋나지 않도록 판정을 하드코딩하지 않고 `TaxonResult` 에서
-파생시킨다.
+화면이 어긋나지 않도록 판정을 하드코딩하지 않고 분석 결과에서 파생시킨다.
+
+판정은 **분석 단위(Scope)에 따라 달라진다.** 문헌 단위를 고르면 개체수가
+없어 군집지수를 낼 수 없고, 정점 하나만 고르면 지점간 유사도를 낼 수 없다.
+낼 수 없는 항목은 숨기지 않고 사유와 함께 보여준다.
 
 판정 기호
     ○ 가능   바로 생성할 수 있다
@@ -15,7 +18,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .runner import TaxonResult
+from ..data.schema import TaxonSpec
+from .runner import ScopeResult, TaxonResult
+from .scope import KIND_STATION, Scope
 
 OK = "○"
 LIMITED = "△"
@@ -39,13 +44,19 @@ class Verdict:
 
 @dataclass
 class ItemVerdict:
-    """분류군 하나에 대한 항목 판정."""
+    """분류군 × 단위 × 항목 판정."""
 
+    code: str
     item: str
     tier: str
     taxon: str
+    scope: str
     table: Verdict
     graph: Verdict
+
+    @property
+    def usable(self) -> bool:
+        return self.table.mark != NONE or self.graph.mark != NONE
 
 
 def _by_categories(count: int, subject: str, species: int | None = None) -> Verdict:
@@ -61,41 +72,59 @@ def _by_categories(count: int, subject: str, species: int | None = None) -> Verd
     return Verdict(OK, f"{subject} {count}개")
 
 
+def _blocked(reason: str) -> tuple[Verdict, Verdict]:
+    return Verdict(NONE, reason), Verdict(NONE, reason)
+
+
+Check = Callable[[ScopeResult, TaxonSpec], tuple[Verdict, Verdict]]
+
+
 # ── 공통 항목 (T1) ─────────────────────────────────────────────────────
 
-def _v_total(r: TaxonResult) -> tuple[Verdict, Verdict]:
+def _v_total(r: ScopeResult, spec: TaxonSpec) -> tuple[Verdict, Verdict]:
     n = r.totals.total
+    if not n:
+        return _blocked("이 단위에서 출현한 종이 없습니다.")
     return (Verdict(OK, f"출현 {n:,}종"),
-            Verdict(OK, "분류군 간 비교 막대") if n else Verdict(NONE, "출현종 없음"))
+            Verdict(OK, "분류군·단위 간 비교 막대"))
 
 
-def _v_source(r: TaxonResult) -> tuple[Verdict, Verdict]:
+def _v_source(r: ScopeResult, spec: TaxonSpec) -> tuple[Verdict, Verdict]:
+    if not (r.scope.has_literature and r.scope.has_field):
+        return _blocked("문헌·현지를 함께 포함하는 단위에서만 대조할 수 있습니다.")
     t = r.totals
     detail = f"공통 {t.both:,} · 문헌단독 {t.literature_only:,} · 현지단독 {t.field_only:,}"
     return Verdict(OK, detail), Verdict(OK, "4구분 누적막대")
 
 
-def _v_round(r: TaxonResult) -> tuple[Verdict, Verdict]:
+def _v_round(r: ScopeResult, spec: TaxonSpec) -> tuple[Verdict, Verdict]:
+    rounds = r.scope.field_rounds
+    if len(rounds) < 2:
+        return _blocked("두 개 이상의 현지조사 회차를 포함해야 비교할 수 있습니다.")
     detail = f"2차 신규 {r.totals.new_in_field_round2:,}종"
-    return Verdict(OK, detail), Verdict(LIMITED, "차수 2개뿐이라 추세 표현 어려움")
+    return Verdict(OK, detail), Verdict(LIMITED, "회차 2개뿐이라 추세 표현 어려움")
 
 
-def _v_family(r: TaxonResult) -> tuple[Verdict, Verdict]:
+def _v_family(r: ScopeResult, spec: TaxonSpec) -> tuple[Verdict, Verdict]:
     n = r.taxonomy.family_count
-    top = r.taxonomy.by_family[0] if r.taxonomy.by_family else ("-", 0)
+    if not n:
+        return _blocked("출현종이 없습니다.")
+    top = r.taxonomy.by_family[0]
     return (Verdict(OK, f"{n:,}과 · 최다 {top[0]} {top[1]:,}종"),
-            _by_categories(n, "과"))
+            _by_categories(n, "과", species=r.totals.total))
 
 
-def _v_order(r: TaxonResult) -> tuple[Verdict, Verdict]:
+def _v_order(r: ScopeResult, spec: TaxonSpec) -> tuple[Verdict, Verdict]:
     n = r.taxonomy.order_count
-    return Verdict(OK, f"{n:,}목"), _by_categories(n, "목")
+    if not n:
+        return _blocked("출현종이 없습니다.")
+    return Verdict(OK, f"{n:,}목"), _by_categories(n, "목", species=r.totals.total)
 
 
-def _v_legal(r: TaxonResult) -> tuple[Verdict, Verdict]:
+def _v_legal(r: ScopeResult, spec: TaxonSpec) -> tuple[Verdict, Verdict]:
     total = r.legal.endangered_total + len(r.legal.natural_monument)
     if not total:
-        return Verdict(OK, "해당 없음(빈 표)"), Verdict(NONE, "출현 보호종 없음")
+        return Verdict(OK, "해당 없음(빈 표)"), Verdict(NONE, "이 단위에 출현한 보호종 없음")
     detail = (f"멸Ⅰ {len(r.legal.endangered_1)} · 멸Ⅱ {len(r.legal.endangered_2)} · "
               f"천연 {len(r.legal.natural_monument)}")
     graph = (Verdict(LIMITED, f"{total}종으로 목록 표가 우선")
@@ -103,51 +132,117 @@ def _v_legal(r: TaxonResult) -> tuple[Verdict, Verdict]:
     return Verdict(OK, detail), graph
 
 
-def _v_invasive(r: TaxonResult) -> tuple[Verdict, Verdict]:
+def _v_invasive(r: ScopeResult, spec: TaxonSpec) -> tuple[Verdict, Verdict]:
     n = len(r.legal.invasive)
-    return (Verdict(OK, f"{n}종"),
-            Verdict(NONE, f"{n}종으로 그래프 실익 없음"))
+    return Verdict(OK, f"{n}종"), Verdict(NONE, f"{n}종으로 그래프 실익 없음")
 
 
-def _v_local(r: TaxonResult) -> tuple[Verdict, Verdict]:
+def _v_local(r: ScopeResult, spec: TaxonSpec) -> tuple[Verdict, Verdict]:
     n = len(r.legal.local_protected)
     return (Verdict(OK, f"{n}종 — 대상지 시·도만 선별"),
             Verdict(NONE, "시·도 선별 후 목록으로 제시"))
 
 
-def _v_species_list(r: TaxonResult) -> tuple[Verdict, Verdict]:
-    return (Verdict(OK, f"{len(r.species_rows):,}행"),
+def _v_species_list(r: ScopeResult, spec: TaxonSpec) -> tuple[Verdict, Verdict]:
+    return (Verdict(OK, f"{r.totals.total:,}행"),
             Verdict(NONE, "목록 자체가 산출물"))
 
 
-def _v_quantitative(r: TaxonResult) -> tuple[Verdict, Verdict]:
+# ── 정량 항목 (T3) ─────────────────────────────────────────────────────
+
+def _v_quantitative(r: ScopeResult, spec: TaxonSpec) -> tuple[Verdict, Verdict]:
     if not r.quantitative:
-        reason = r.quantitative_unavailable or "개체수 없음"
-        return Verdict(NONE, reason), Verdict(NONE, reason)
-    q = r.quantitative[0]
-    return (Verdict(OK, f"{q.label} S={q.species_count:,} N={q.individuals:,}"),
-            Verdict(LIMITED, "차수 2개 — 차수 간 비교 막대"))
+        return _blocked(r.quantitative_unavailable or "개체수 없음")
+    if len(r.quantitative) == 1:
+        q = r.quantitative[0]
+        return (Verdict(OK, f"S={q.species_count:,} N={q.individuals:,} H'={q.diversity:.3f}"),
+                Verdict(LIMITED, "단일 단위 — 비교 대상이 없어 표가 적합"))
+    return (Verdict(OK, f"{len(r.quantitative)}개 단위 비교"),
+            Verdict(OK, f"단위 {len(r.quantitative)}개 비교 막대"))
 
 
-def _v_dominant(r: TaxonResult) -> tuple[Verdict, Verdict]:
+def _v_dominant(r: ScopeResult, spec: TaxonSpec) -> tuple[Verdict, Verdict]:
     if not r.quantitative:
-        reason = r.quantitative_unavailable or "개체수 없음"
-        return Verdict(NONE, reason), Verdict(NONE, reason)
+        return _blocked(r.quantitative_unavailable or "개체수 없음")
     q = r.quantitative[0]
     share = sum(ra for _, _, ra in q.dominant)
     return (Verdict(OK, f"우점 {q.dominant_species} · 상위{len(q.dominant)}종 {share:.1f}%"),
             Verdict(OK, "상대풍부도 막대"))
 
 
+# ── 정점 항목 ──────────────────────────────────────────────────────────
+
+def _station_rounds(r: ScopeResult, spec: TaxonSpec):
+    """정점이 2개 이상 포함된 회차만 지점별 분석이 의미 있다."""
+    if not spec.has_stations:
+        return []
+    return [a for a in r.stations if len(a.stations) >= 2]
+
+
+def _v_station_species(r: ScopeResult, spec: TaxonSpec) -> tuple[Verdict, Verdict]:
+    rounds = _station_rounds(r, spec)
+    if not rounds:
+        if not spec.has_stations:
+            return _blocked("정점조사를 하지 않는 분류군입니다.")
+        return _blocked("정점을 2개 이상 포함하는 단위를 고르십시오.")
+    a = rounds[0]
+    counts = [s.species_count for s in a.stations]
+    return (Verdict(OK, f"{a.round_name} 정점별 {min(counts)}~{max(counts)}종"),
+            _by_categories(len(a.stations), "정점"))
+
+
+def _v_station_individuals(r: ScopeResult, spec: TaxonSpec) -> tuple[Verdict, Verdict]:
+    rounds = _station_rounds(r, spec)
+    if not rounds:
+        if not spec.has_stations:
+            return _blocked("정점조사를 하지 않는 분류군입니다.")
+        return _blocked("정점을 2개 이상 포함하는 단위를 고르십시오.")
+    a = rounds[0]
+    values = [s.individuals for s in a.stations if s.individuals]
+    if not values:
+        return _blocked("정점별 개체수가 없습니다.")
+    return (Verdict(OK, f"{a.round_name} 정점별 {min(values):,}~{max(values):,}개체"),
+            _by_categories(len(a.stations), "정점"))
+
+
+def _v_station_indices(r: ScopeResult, spec: TaxonSpec) -> tuple[Verdict, Verdict]:
+    rounds = _station_rounds(r, spec)
+    if not rounds:
+        if not spec.has_stations:
+            return _blocked("정점조사를 하지 않는 분류군입니다.")
+        return _blocked("정점을 2개 이상 포함하는 단위를 고르십시오.")
+    a = rounds[0]
+    hs = [s.indices.diversity for s in a.stations if s.indices]
+    if not hs:
+        return _blocked("정점별 개체수가 없어 지수를 낼 수 없습니다.")
+    return (Verdict(OK, f"{a.round_name} H' {min(hs):.3f}~{max(hs):.3f}"),
+            _by_categories(len(a.stations), "정점"))
+
+
+def _v_station_similarity(r: ScopeResult, spec: TaxonSpec) -> tuple[Verdict, Verdict]:
+    rounds = _station_rounds(r, spec)
+    if not rounds:
+        if not spec.has_stations:
+            return _blocked("정점조사를 하지 않는 분류군입니다.")
+        return _blocked("정점을 2개 이상 포함하는 단위를 고르십시오.")
+    a = rounds[0]
+    off = [a.similarity[i][j] for i in range(len(a.stations))
+           for j in range(len(a.stations)) if i != j]
+    n = len(a.stations)
+    return (Verdict(OK, f"{a.round_name} Sørensen {min(off):.3f}~{max(off):.3f} · "
+                        f"전 정점 공통 {a.shared_all}종"),
+            Verdict(LIMITED, f"{n}×{n} 히트맵"))
+
+
 # ── 분류군 특이 항목 (T2) ──────────────────────────────────────────────
 
-def _specific(name: str) -> Callable[[TaxonResult], tuple[Verdict, Verdict]]:
+def _specific(name: str) -> Check:
     """T2 결과에서 해당 항목을 찾아 판정한다."""
 
-    def check(r: TaxonResult) -> tuple[Verdict, Verdict]:
+    def check(r: ScopeResult, spec: TaxonSpec) -> tuple[Verdict, Verdict]:
         item = next((i for i in r.specific if i.name.startswith(name)), None)
         if item is None:
-            return Verdict(NONE, "해당 자료 없음"), Verdict(NONE, "해당 자료 없음")
+            return _blocked("이 단위에 해당 자료가 없습니다.")
         table = Verdict(OK, f"{item.value}{' · ' + item.note if item.note else ''}")
         if item.breakdown:
             graph = _by_categories(len(item.breakdown), "범주")
@@ -160,11 +255,11 @@ def _specific(name: str) -> Callable[[TaxonResult], tuple[Verdict, Verdict]]:
     return check
 
 
-def _v_saprobic(r: TaxonResult) -> tuple[Verdict, Verdict]:
+def _v_saprobic(r: ScopeResult, spec: TaxonSpec) -> tuple[Verdict, Verdict]:
     """오수생물지수는 지수 자체보다 Qi 보유 커버리지가 신뢰도를 좌우한다."""
     item = next((i for i in r.specific if i.name.startswith("오수생물지수")), None)
     if item is None:
-        return Verdict(NONE, "Qi 자료 없음"), Verdict(NONE, "Qi 자료 없음")
+        return _blocked("이 단위에 Qi 자료가 없습니다.")
     bd = dict(item.breakdown)
     have = bd.get("Qi 보유 출현종", 0)
     contrib = bd.get("가중평균 기여종 (개체수 보유)", 0)
@@ -184,7 +279,7 @@ class ItemSpec:
     name: str
     tier: str
     taxa: tuple[str, ...] | None  # None 이면 전 분류군
-    check: Callable[[TaxonResult], tuple[Verdict, Verdict]]
+    check: Check
     note: str = ""
 
     def applies_to(self, taxon: str) -> bool:
@@ -193,6 +288,7 @@ class ItemSpec:
 
 ALL = None
 COUNT_TAXA = ("조류", "어류", "저서성대형무척추동물")
+STATION_TAXA = ("어류", "저서성대형무척추동물")
 
 ITEMS: tuple[ItemSpec, ...] = (
     ItemSpec("T1-01", "출현종 총괄", "T1", ALL, _v_total),
@@ -216,22 +312,37 @@ ITEMS: tuple[ItemSpec, ...] = (
     ItemSpec("T2-F2", "외래종", "T2", ("어류",), _specific("외래종")),
     ItemSpec("T2-N1", "오수생물지수 Qi", "T2", ("저서성대형무척추동물",), _v_saprobic),
 
-    ItemSpec("T3-01", "우점종·상대풍부도", "T3", COUNT_TAXA, _v_dominant),
-    ItemSpec("T3-02", "군집지수 (DI·H'·J'·R1)", "T3", COUNT_TAXA, _v_quantitative),
+    # 군집지수는 어느 분류군에서든 요구될 수 있다. 낼 수 없는 분류군에도
+    # 항목을 남겨 두고 사유를 보여준다. 숨기면 "왜 없지?"가 된다.
+    ItemSpec("T3-01", "우점종·상대풍부도", "T3", ALL, _v_dominant),
+    ItemSpec("T3-02", "군집지수 (DI·H'·J'·R1)", "T3", ALL, _v_quantitative),
+
+    ItemSpec("S-01", "지점별 출현종수", "S", STATION_TAXA, _v_station_species),
+    ItemSpec("S-02", "지점별 개체수", "S", STATION_TAXA, _v_station_individuals),
+    ItemSpec("S-03", "지점별 군집지수", "S", STATION_TAXA, _v_station_indices),
+    ItemSpec("S-04", "지점간 유사도 (Sørensen)", "S", STATION_TAXA, _v_station_similarity),
 )
+
+ITEM_BY_CODE = {i.code: i for i in ITEMS}
+
+
+def evaluate_scope(result: TaxonResult, scope_key: str) -> list[ItemVerdict]:
+    """분류군의 한 단위에 대해 모든 항목을 판정한다."""
+    sr = result.scope_result(scope_key)
+    out: list[ItemVerdict] = []
+    for spec in ITEMS:
+        if not spec.applies_to(result.name):
+            continue
+        table, graph = spec.check(sr, result.spec)
+        out.append(ItemVerdict(spec.code, spec.name, spec.tier, result.name,
+                               scope_key, table, graph))
+    return out
 
 
 def evaluate(results: list[TaxonResult]) -> list[ItemVerdict]:
-    """모든 항목 × 분류군 조합을 판정한다."""
-    by_name = {r.name: r for r in results}
-    out: list[ItemVerdict] = []
-    for spec in ITEMS:
-        for r in results:
-            if not spec.applies_to(r.name):
-                continue
-            table, graph = spec.check(r)
-            out.append(ItemVerdict(spec.name, spec.tier, r.name, table, graph))
-    return out
+    """모든 분류군 × 단위 × 항목을 판정한다."""
+    return [v for r in results for s in r.scopes
+            for v in evaluate_scope(r, s.key)]
 
 
 def summarize(results: list[TaxonResult]) -> dict[str, dict[str, int]]:
