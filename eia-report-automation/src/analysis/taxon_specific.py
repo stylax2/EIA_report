@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from ..data.schema import FIELD_COLUMNS, MAMMAL_METHODS, is_null_token
+from ..data.schema import FIELD_COLUMNS, MAMMAL_METHODS, is_null_token, normalize_grade
 
 # 마스터DB에 국명이 없는 종(어류 2건)은 학명으로 표시한다
 MISSING_KOREAN_NAME = "[국명없음]"
@@ -114,10 +114,16 @@ def analyze_benthos(occurred: pd.DataFrame) -> list[SpecificItem]:
     if not mask.any():
         return []
     weighted = float((qi[mask] * counts[mask]).sum() / counts[mask].sum())
+    # Qi 를 가진 출현종과, 그중 개체수까지 있어 가중평균에 실제로 기여하는
+    # 종은 다르다. 지수의 신뢰도는 후자가 좌우하므로 둘을 나눠 보고한다.
     return [SpecificItem(
         name="오수생물지수 Qi (참고값)",
         value=f"{weighted:.2f}",
-        breakdown=[("Qi 보유종", int(mask.sum())), ("Qi 미보유종", int(len(occurred) - mask.sum()))],
+        breakdown=[
+            ("Qi 보유 출현종", int(qi.notna().sum())),
+            ("가중평균 기여종 (개체수 보유)", int(mask.sum())),
+            ("Qi 미보유 출현종", int(qi.isna().sum())),
+        ],
         note="공식 KSI/ESB 아님. 지표가중치·출현량 등급 확보 후 정식 산출 예정",
     )]
 
@@ -127,12 +133,17 @@ def analyze_plants(occurred: pd.DataFrame) -> list[SpecificItem]:
     items: list[SpecificItem] = []
     total = len(occurred)
 
-    floristic = _counts(occurred, "식물구계학적특정종")
-    if not floristic.empty:
-        order = ["Ⅴ", "Ⅳ", "Ⅲ", "Ⅱ", "Ⅰ"]
-        bd = [(f"{g}등급", int(floristic.get(g, 0))) for g in order if g in floristic.index]
-        items.append(SpecificItem(
-            name="식물구계학적특정종", value=f"{int(floristic.sum())}종", breakdown=bd))
+    if "식물구계학적특정종" in occurred.columns:
+        # 표기 흔들림에 걸리지 않도록 등급을 정규화한 뒤 센다
+        grades = occurred["식물구계학적특정종"].map(normalize_grade)
+        grades = grades[grades != ""]
+        if not grades.empty:
+            vc = grades.value_counts()
+            order = ["Ⅴ", "Ⅳ", "Ⅲ", "Ⅱ", "Ⅰ"]
+            bd = [(f"{g}등급", int(vc[g])) for g in order if g in vc.index]
+            bd += [(str(k), int(v)) for k, v in vc.items() if k not in order]
+            items.append(SpecificItem(
+                name="식물구계학적특정종", value=f"{int(vc.sum())}종", breakdown=bd))
 
     rare = _counts(occurred, "희귀식물등급")
     if not rare.empty:

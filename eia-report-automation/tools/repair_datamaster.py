@@ -72,20 +72,44 @@ def is_text_column(series: pd.Series) -> bool:
     return pd.api.types.is_string_dtype(series) or series.dtype == object
 
 
-def norm(value: object) -> str:
-    """NFKC 정규화 + 공백 정리. 유니코드 수학 이탤릭이 ASCII 가 된다."""
+# 등급·코드 컬럼. 로마숫자(Ⅰ~Ⅴ)를 값으로 쓰므로 NFKC 를 적용하면 안 된다.
+# NFKC 는 호환 문자를 분해하기 때문에 'Ⅱ'(U+2161) 가 'II'(ASCII 2자) 로 바뀐다.
+CODE_COLUMNS = {
+    "species_id", "taxon_rank", "nibr_ktsn", "source_flag",
+    "멸종위기야생생물", "천연기념물", "생태계교란생물", "고유종", "외래종",
+    "식물구계학적특정종", "희귀식물등급", "특산식물", "귀화식물",
+    "abb", "abb2", "raunkiaer_form", "migratory_type",
+    "saprobic_index_Qi", "dual_habitat_ref_id", "merged_from",
+}
+
+
+def norm(value: object, keep_compat: bool = False) -> str:
+    """공백 정리 + 유니코드 정규화.
+
+    기본은 NFKC 로, 학명의 유니코드 수학 이탤릭('𝐸𝑟𝑖𝑛𝑎𝑐𝑒𝑢𝑠')을 ASCII 로
+    되돌린다. `keep_compat=True` 면 NFC 를 써서 호환 문자를 분해하지
+    않는다. 등급 컬럼의 로마숫자를 보존하기 위한 것이다.
+    """
     if value is None:
         return ""
-    return " ".join(unicodedata.normalize("NFKC", str(value)).split())
+    form = "NFC" if keep_compat else "NFKC"
+    return " ".join(unicodedata.normalize(form, str(value)).split())
+
+
+def norm_column(value: object, column: str) -> str:
+    """컬럼 성격에 맞는 정규화를 고른다."""
+    return norm(value, keep_compat=column in CODE_COLUMNS)
 
 
 def is_null(value: object) -> bool:
-    return norm(value) in ("", NULL, "nan", "None", "NaN")
+    return norm(value, keep_compat=True) in ("", NULL, "nan", "None", "NaN")
 
 
-def clean(value: object) -> str:
+def clean(value: object, column: str | None = None) -> str:
     """값이 없으면 '-' 로 통일한다."""
-    return NULL if is_null(value) else norm(value)
+    if is_null(value):
+        return NULL
+    return norm(value, keep_compat=column in CODE_COLUMNS) if column else norm(value)
 
 
 @dataclass
@@ -111,7 +135,7 @@ GENUS_LOWER = re.compile(r"^[a-z]")
 def normalize_names(df: pd.DataFrame, taxon: str, log: RepairLog) -> pd.DataFrame:
     for col in df.columns:
         if is_text_column(df[col]):
-            df[col] = df[col].map(lambda v: norm(v) if v is not None else v)
+            df[col] = df[col].map(lambda v, c=col: norm_column(v, c) if v is not None else v)
 
     unified: dict[str, int] = {}
     for i, r in df.iterrows():
@@ -191,7 +215,7 @@ def fix_rank(df: pd.DataFrame, taxon: str, log: RepairLog) -> pd.DataFrame:
     n = 0
     for i, r in df.iterrows():
         sn = str(r["scientific_name"])
-        if norm(r.get("taxon_rank")) != "종":
+        if norm(r.get("taxon_rank"), keep_compat=True) != "종":
             continue
         if any(c in sn for c in RANK_CONNECTORS):
             continue
@@ -229,7 +253,7 @@ def merge_duplicates(df: pd.DataFrame, taxon: str, log: RepairLog
         for c in attrs:
             values, seen = [], set()
             for i in idx:
-                v = clean(df.at[i, c])
+                v = clean(df.at[i, c], c)
                 if v != NULL and v not in seen:
                     seen.add(v)
                     values.append(v)
@@ -254,24 +278,67 @@ def merge_duplicates(df: pd.DataFrame, taxon: str, log: RepairLog
     return df, remap
 
 
+# ── 4.5 수서곤충 교차 참조 복구 ────────────────────────────────────────
+
+# 육상곤충류와 저서성대형무척추동물은 같은 종을 유충(수서)·성충(육상)으로
+# 나눠 싣는다. dual_habitat_ref_id 가 그 짝을 가리키는데, v6 은 ID 형식이
+# 어긋나 한 건도 해결되지 않는다.
+#   저서 시트의 참조: 'IN08312'  → 곤충 ID 는 'IN000001' (6자리)
+#   곤충 시트의 참조: 'BI00500'  → 저서 ID 는 'BE00001'  (접두사 BE)
+DUAL_HABITAT_PAIR = {"육상곤충류": ("저서성대형무척추동물", "BI", "BE", 5),
+                     "저서성대형무척추동물": ("육상곤충류", "IN", "IN", 6)}
+
+
+def fix_dual_habitat(sheets: dict[str, pd.DataFrame], log: RepairLog) -> None:
+    """교차 참조 ID 를 상대 시트의 실제 형식으로 맞춘다."""
+    for taxon, (other, src_prefix, dst_prefix, width) in DUAL_HABITAT_PAIR.items():
+        df = sheets.get(taxon)
+        if df is None or "dual_habitat_ref_id" not in df.columns:
+            continue
+        valid = set(sheets[other]["species_id"])
+        fixed = dangling = 0
+        for i, ref in df["dual_habitat_ref_id"].items():
+            if is_null(ref):
+                continue
+            digits = norm(ref, keep_compat=True)[len(src_prefix):]
+            if not digits.isdigit():
+                continue
+            candidate = f"{dst_prefix}{digits.zfill(width)}"
+            if candidate in valid:
+                if candidate != norm(ref, keep_compat=True):
+                    df.at[i, "dual_habitat_ref_id"] = candidate
+                    fixed += 1
+            else:
+                # 상대 시트에 없는 종을 가리킨다. 끊어진 참조를 남겨두면
+                # 조인 시 조용히 누락되므로 비운다.
+                df.at[i, "dual_habitat_ref_id"] = NULL
+                dangling += 1
+        if fixed:
+            log.add(taxon, "교차 참조 복구", "dual_habitat_ref_id",
+                    f"{other} 참조 {fixed}건을 실제 ID 형식으로 보정")
+        if dangling:
+            log.add(taxon, "확인 필요", "dual_habitat_ref_id",
+                    f"{other} 에 대상이 없는 참조 {dangling}건 — 비움")
+
+
 # ── 5. abb 재계산 ──────────────────────────────────────────────────────
 
 def build_abb(row: pd.Series, is_plant: bool) -> str:
     """법정 지위 통합 약어. v6 설명 시트의 조합 규칙을 따른다."""
     parts: list[str] = []
     if not is_null(row.get("멸종위기야생생물")):
-        parts.append(norm(row["멸종위기야생생물"]))
+        parts.append(norm(row["멸종위기야생생물"], keep_compat=True))
     if not is_null(row.get("천연기념물")):
         parts.append("천")
     if not is_null(row.get("생태계교란생물")):
         parts.append("교")
     if is_plant:
         if not is_null(row.get("식물구계학적특정종")):
-            parts.append(norm(row["식물구계학적특정종"]))
+            parts.append(norm(row["식물구계학적특정종"], keep_compat=True))
         if not is_null(row.get("희귀식물등급")):
-            parts.append(norm(row["희귀식물등급"]))
+            parts.append(norm(row["희귀식물등급"], keep_compat=True))
         if not is_null(row.get("특산식물")):
-            parts.append("특" if norm(row["특산식물"]) == "Y" else "특?")
+            parts.append("특" if norm(row["특산식물"], keep_compat=True) == "Y" else "특?")
         if not is_null(row.get("귀화식물")):
             parts.append("귀")
     return "/".join(parts) if parts else NULL
@@ -282,10 +349,10 @@ def recompute_abb(df: pd.DataFrame, taxon: str, log: RepairLog) -> pd.DataFrame:
     changed = 0
     for i, r in df.iterrows():
         new = build_abb(r, is_plant)
-        if new != clean(r.get("abb")):
+        if new != clean(r.get("abb"), "abb"):
             if not is_null(r.get("abb")):
                 log.add(taxon, "abb 재계산", str(r["species_id"]),
-                        f"'{clean(r.get('abb'))}' → '{new}'")
+                        f"'{clean(r.get('abb'), 'abb')}' → '{new}'")
                 changed += 1
             df.at[i, "abb"] = new
     if changed:
@@ -307,7 +374,7 @@ def repair_sheet(master: pd.DataFrame, taxon: str, log: RepairLog
 
     for c in df.columns:
         if is_text_column(df[c]):
-            df[c] = df[c].map(clean)
+            df[c] = df[c].map(lambda v, col=c: clean(v, col))
 
     missing = int((df["korean_name"] == MISSING_KOREAN).sum())
     if missing:
@@ -443,6 +510,9 @@ def main() -> None:
         samples[taxon] = out
 
         print(f"  {taxon:<14} {len(src):>6} → {len(repaired):>6}행")
+
+    # 두 시트가 모두 정비된 뒤에야 교차 참조를 맞출 수 있다
+    fix_dual_habitat(masters, log)
 
     log_df = log.frame()
     write_workbook(OUT_MASTER, masters, _guide("마스터DB"), log_df)

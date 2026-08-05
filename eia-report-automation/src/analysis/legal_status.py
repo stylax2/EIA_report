@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from ..data.schema import is_null_token
+from ..data.schema import is_null_token, normalize_grade
 from .taxon_specific import display_name
 
 
@@ -59,13 +59,12 @@ def summarize_legal(occurred: pd.DataFrame) -> LegalSummary:
     """출현종 중 법정 지위를 가진 종을 추출한다."""
     out = LegalSummary()
     for _, r in occurred.iterrows():
-        grade = r.get("멸종위기야생생물")
-        if not is_null_token(grade):
-            g = str(grade).strip()
-            if "Ⅰ" in g:
-                out.endangered_1.append(_entry(r, "멸종위기야생생물 Ⅰ급"))
-            elif "Ⅱ" in g:
-                out.endangered_2.append(_entry(r, "멸종위기야생생물 Ⅱ급"))
+        # 표기가 흔들려도(멸Ⅱ / 멸II / Ⅱ급) 같은 등급으로 판정한다
+        grade = normalize_grade(r.get("멸종위기야생생물"))
+        if grade == "Ⅰ":
+            out.endangered_1.append(_entry(r, "멸종위기야생생물 Ⅰ급"))
+        elif grade == "Ⅱ":
+            out.endangered_2.append(_entry(r, "멸종위기야생생물 Ⅱ급"))
         if not is_null_token(r.get("천연기념물")):
             out.natural_monument.append(_entry(r, "천연기념물"))
         if not is_null_token(r.get("생태계교란생물")):

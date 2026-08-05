@@ -9,6 +9,7 @@
 | 문서 | 내용 |
 |---|---|
 | `docs/analysis_items.md` | 범용 분석항목 카탈로그 (T1/T2/T3) |
+| `docs/analysis_items_by_taxon.md` | 분류군별 항목과 표·그래프 산출 가능성 판정 |
 | `docs/analysis_workflow.md` | 원자료 구조와 분석 워크플로 |
 | `docs/architecture.md` | 계층 경계 |
 | `docs/data_schema.md` | 데이터 스키마 |

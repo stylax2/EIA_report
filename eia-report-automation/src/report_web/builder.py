@@ -16,6 +16,15 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from ..analysis.item_catalog import (
+    LIMITED,
+    NONE,
+    OK,
+    ItemVerdict,
+    Verdict,
+    evaluate,
+    summarize,
+)
 from ..analysis.runner import TaxonResult
 from ..data.schema import FIELD_COLUMNS, LITERATURE_COLUMNS
 
@@ -267,6 +276,54 @@ def _matrix(results: list[TaxonResult]) -> str:
 </section>"""
 
 
+def _item_matrix(results: list[TaxonResult]) -> str:
+    """분석항목별 표·그래프 산출 가능성.
+
+    판정은 `analysis/item_catalog.py` 가 TaxonResult 에서 파생시킨다.
+    화면에서 다시 계산하지 않으므로 문서와 어긋나지 않는다.
+    """
+    verdicts = evaluate(results)
+    counts = summarize(results)
+    order = {r.name: i for i, r in enumerate(results)}
+
+    by_item: dict[tuple[str, str], list[ItemVerdict]] = {}
+    for v in verdicts:
+        by_item.setdefault((v.tier, v.item), []).append(v)
+
+    def cell(v: Verdict) -> str:
+        tone = {OK: "m-ok", LIMITED: "m-lim", NONE: "m-no"}[v.mark]
+        return f'<span class="{tone}" title="{_esc(v.reason)}">{v.mark}</span>'
+
+    blocks = []
+    for (tier, item), group in by_item.items():
+        group.sort(key=lambda v: order.get(v.taxon, 99))
+        scope = ("전 분류군" if len(group) == len(results)
+                 else f"{len(group)}개 분류군")
+        chips = "".join(
+            f'<span class="verdict"><span class="v-taxon">{_esc(v.taxon)}</span>'
+            f'{cell(v.table)}{cell(v.graph)}</span>' for v in group)
+        blocks.append(
+            f'<div class="item-row">'
+            f'<div class="item-head"><span class="tier">{tier}</span>'
+            f'<span class="item-name">{_esc(item)}</span>'
+            f'<span class="item-scope">{_esc(scope)}</span></div>'
+            f'<div class="verdicts">{chips}</div></div>')
+
+    legend = (f'<p class="hint">각 항목마다 분류군별로 <b>표 · 그래프</b> 순서로 판정한다. '
+              f'기호에 마우스를 올리면 근거가 나온다. '
+              f'판정 {len(verdicts)}건 중 그래프 '
+              f'<span class="m-ok">○</span> 가능 {counts["그래프"][OK]} · '
+              f'<span class="m-lim">△</span> 제한 {counts["그래프"][LIMITED]} · '
+              f'<span class="m-no">✗</span> 불가 {counts["그래프"][NONE]}</p>')
+
+    return f"""
+<section class="panel" id="items">
+  <h3>분석항목 적용 매트릭스</h3>
+  {legend}
+  <div class="item-list">{"".join(blocks)}</div>
+</section>"""
+
+
 CSS = """
 :root{
   --ink:#16211d; --ink-2:#3d4b45; --ink-3:#6b7a72;
@@ -428,6 +485,23 @@ table{border-collapse:collapse;width:100%;font-size:.84rem}
 .species .dash{text-align:center;color:var(--line)}
 .species td.num{text-align:right}
 .species .abb{font-size:.74rem;font-weight:700;color:var(--critical)}
+
+/* ── 항목 매트릭스 ── */
+.item-list{display:flex;flex-direction:column}
+.item-row{padding:11px 0;border-bottom:1px solid var(--line-2)}
+.item-row:last-child{border-bottom:0}
+.item-row:first-child{padding-top:0}
+.item-head{display:flex;align-items:center;gap:9px;margin-bottom:7px;flex-wrap:wrap}
+.item-name{font-size:.86rem;font-weight:600}
+.item-scope{font-size:.73rem;color:var(--ink-3)}
+.verdicts{display:flex;flex-wrap:wrap;gap:5px}
+.verdict{display:inline-flex;align-items:center;gap:4px;
+  background:var(--surface-2);border-radius:3px;padding:3px 8px;font-size:.76rem}
+.v-taxon{color:var(--ink-3)}
+.m-ok{color:var(--moss);font-weight:700;cursor:help}
+.m-lim{color:var(--warn);font-weight:700;cursor:help}
+.m-no{color:var(--muted);font-weight:700;cursor:help}
+.hint b{color:var(--ink-2)}
 
 /* ── 막대 ── */
 .bars{display:flex;flex-direction:column;gap:5px}
@@ -605,6 +679,7 @@ def build_body(results: list[TaxonResult], master_path: str, survey_path: str) -
         f'<p>8개 분류군의 출현종수와 분석항목 산출 가능 범위</p></div>'
         f'{_matrix(results)}'
         f'{_bars("분류군별 출현종수", [(r.name, r.totals.total) for r in results])}'
+        f'{_item_matrix(results)}'
         f'</section>'
     ]
     for r in results:

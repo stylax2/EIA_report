@@ -79,6 +79,32 @@ def is_null_token(value: object) -> bool:
     return value is None or str(value).strip() in NULL_TOKENS
 
 
+# 로마숫자 등급은 표기가 흔들린다. 원자료는 유니코드 로마숫자(Ⅰ~Ⅴ)를 쓰지만
+# NFKC 정규화를 거치면 ASCII(I~V)가 되고, 손입력에는 아라비아 숫자도 섞인다.
+# 판정 코드가 특정 표기를 직접 찾으면 표기가 바뀌는 순간 조용히 0건이 된다.
+ROMAN_ALIASES = {
+    "Ⅰ": "Ⅰ", "I": "Ⅰ", "1": "Ⅰ",
+    "Ⅱ": "Ⅱ", "II": "Ⅱ", "2": "Ⅱ",
+    "Ⅲ": "Ⅲ", "III": "Ⅲ", "3": "Ⅲ",
+    "Ⅳ": "Ⅳ", "IV": "Ⅳ", "4": "Ⅳ",
+    "Ⅴ": "Ⅴ", "V": "Ⅴ", "5": "Ⅴ",
+}
+
+
+def normalize_grade(value: object) -> str:
+    """등급 표기를 유니코드 로마숫자로 통일한다.
+
+    접두사(멸)와 접미사(급)를 떼고 숫자 부분만 본다.
+    '멸Ⅱ', '멸II', 'Ⅱ급', 'II' 는 모두 'Ⅱ' 가 된다. 등급을 찾지 못하면
+    원래 문자열을 그대로 돌려준다.
+    """
+    if is_null_token(value):
+        return ""
+    text = str(value).strip()
+    core = text.removeprefix("멸").removesuffix("급").strip()
+    return ROMAN_ALIASES.get(core.upper(), text)
+
+
 def get_spec(taxon: str) -> TaxonSpec:
     """분류군 이름 또는 코드로 사양을 찾는다."""
     if taxon in SPEC_BY_NAME:
