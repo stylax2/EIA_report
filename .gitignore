@@ -5,7 +5,7 @@ __pycache__/
 venv/
 .pytest_cache/
 
-# 생성물
+# 생성물 (분석 실행으로 언제든 재생성된다)
 eia-report-automation/output/
 eia-report-automation/**/*.png
 eia-report-automation/photos/
