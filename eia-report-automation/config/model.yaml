@@ -1,0 +1,12 @@
+# Local LLM 설정 (기획안 5.1, 11.3)
+# 모델 파일은 각 개발 PC 에 설치하고 GitHub 로 동기화하지 않는다.
+# PC 가 달라지면 이 파일의 model 값만 바꾼다.
+
+provider: ollama
+host: http://localhost:11434
+model: gemma3:12b        # 후보: gemma / qwen / llama 계열
+temperature: 0.2         # 보고서 문체는 낮게 유지한다
+max_tokens: 1024
+
+# 외부 API 는 사용하지 않는다. 평가서 데이터는 로컬을 벗어나지 않는다.
+allow_remote_api: false

@@ -1,0 +1,41 @@
+# 표 서식 정의 (기획안 8.2)
+# LLM 은 선 두께나 셀 여백을 결정하지 않는다. 코드는 아래 스타일 이름만
+# 지정하고, 실제 속성은 이 파일에서 관리한다.
+# 값은 기존 평가서 샘플을 실측한 뒤 확정한다.
+
+defaults: &defaults
+  font: 함초롬바탕
+  font_size_pt: 9
+  align: center
+  line_type: solid
+  line_width_mm: 0.12
+  cell_padding_mm: 0.5
+  row_height_mm: 6.0
+
+TABLE_SPECIES_LIST:
+  <<: *defaults
+  header_repeat: true          # 페이지마다 머리글 반복
+  rows_per_page: 30            # 실측 후 확정
+  columns:
+    - {name: 번호, width_mm: 12}
+    - {name: 과명, width_mm: 35}
+    - {name: 국명, width_mm: 45}
+    - {name: 학명, width_mm: 60, italic: true}
+    - {name: 비고, width_mm: 25}
+
+TABLE_SURVEY_RESULT:
+  <<: *defaults
+  header_repeat: true
+  rows_per_page: 25
+
+TABLE_PROTECTED_SPECIES:
+  <<: *defaults
+  header_repeat: true
+  rows_per_page: 20
+
+TABLE_PHOTO_PLATE:
+  <<: *defaults
+  align: center
+  caption_font_size_pt: 9
+  image_row_height_mm: 45.0
+  caption_row_height_mm: 7.0

@@ -1,0 +1,18 @@
+# 데이터 처리
+pandas>=2.2
+openpyxl>=3.1
+
+# 그래프
+matplotlib>=3.8
+
+# 설정
+PyYAML>=6.0
+
+# 로컬 LLM 런타임 연동
+requests>=2.32
+
+# 테스트
+pytest>=8.0
+
+# 한글 문서 조판 (Windows + 한글 프로그램 필요)
+# pyhwpx

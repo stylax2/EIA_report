@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# 생성물
+eia-report-automation/output/
+eia-report-automation/**/*.png
+eia-report-automation/photos/
+
+# 로컬 환경
+.env
+.DS_Store
+
+# 파일럿 단계 예외
+# 기획안 11.1 은 실제 조사자료와 대용량 평가서를 저장소에 두지 않도록
+# 정하고 있으나, 파일럿 기간에는 datamaster/ 와 평가서샘플/ 을 유지한다.
+# 실제 운용 단계로 넘어갈 때 별도 저장소로 옮기고 아래 주석을 해제한다.
+# datamaster/
+# 평가서샘플/
