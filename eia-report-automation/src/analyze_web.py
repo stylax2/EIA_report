@@ -14,8 +14,8 @@ from .analysis.runner import analyze_all
 from .report_web.builder import write_report
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MASTER = ROOT / "datamaster" / "EIA_표준종목록_마스터DB_통합본_v6.xlsx"
-DEFAULT_SURVEY = ROOT / "datamaster" / "EIA_가상데이터.xlsx"
+DEFAULT_MASTER = ROOT / "datamaster" / "EIA_표준종목록_마스터DB_통합본_v7.xlsx"
+DEFAULT_SURVEY = ROOT / "datamaster" / "EIA_가상데이터_v7.xlsx"
 DEFAULT_OUT = Path(__file__).resolve().parents[1] / "output" / "analysis_report.html"
 
 

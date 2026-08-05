@@ -121,42 +121,87 @@ def _presence_columns(df: pd.DataFrame, spec: TaxonSpec) -> tuple[pd.DataFrame, 
     return df, warnings
 
 
-def load_taxon(
-    master_path: Path | str,
-    survey_path: Path | str,
-    taxon: str,
-) -> TaxonDataset:
-    """마스터DB와 조사자료에서 분류군 하나를 읽어 합친다."""
-    spec = get_spec(taxon)
-    master = pd.read_excel(master_path, sheet_name=spec.name)
-    survey = pd.read_excel(survey_path, sheet_name=spec.name)
+def _join_by_id(df: pd.DataFrame, survey: pd.DataFrame, taxon: str
+                ) -> tuple[pd.DataFrame, list[str]]:
+    """species_id 로 조인한다(v7 이후). 행 순서·행 수와 무관하다."""
+    warnings: list[str] = []
+    ids = df["species_id"].map(normalize_text)
+    survey_ids = survey["species_id"].map(normalize_text)
 
-    if len(master) != len(survey):
+    dup = survey_ids[survey_ids.duplicated()].tolist()
+    if dup:
         raise ValueError(
-            f"[{spec.name}] 행 수가 다릅니다. 마스터DB {len(master)}행, 조사자료 {len(survey)}행. "
-            "조사자료의 행을 삽입·삭제·정렬하면 위치 조인이 깨집니다."
+            f"[{taxon}] 조사자료에 species_id 가 중복됩니다: {dup[:5]}. "
+            "한 종은 한 행이어야 합니다."
         )
 
-    # 행 위치로 조인하되 국명·학명이 일치하는지 확인한다
+    unknown = sorted(set(survey_ids) - set(ids))
+    if unknown:
+        raise ValueError(
+            f"[{taxon}] 마스터DB에 없는 species_id {len(unknown)}건: {unknown[:5]}. "
+            "종을 추가하려면 마스터DB에 먼저 등록하십시오."
+        )
+
+    lookup = survey.set_index(survey_ids)
+    missing = int((~ids.isin(set(survey_ids))).sum())
+    if missing:
+        warnings.append(f"조사자료에 기록이 없는 종 {missing}건 — 미출현으로 처리")
+
+    for col in SURVEY_COLUMNS:
+        df[col] = ids.map(lookup[col]) if col in lookup.columns else None
+    return df, warnings
+
+
+def _join_by_position(df: pd.DataFrame, survey: pd.DataFrame, taxon: str
+                      ) -> tuple[pd.DataFrame, list[str]]:
+    """행 위치로 조인한다(v6 이하). 국명·학명으로 어긋남을 잡는다."""
+    warnings = ["조사자료에 species_id 가 없어 행 위치로 조인했습니다. v7 이상을 쓰십시오."]
+    if len(df) != len(survey):
+        raise ValueError(
+            f"[{taxon}] 행 수가 다릅니다. 마스터DB {len(df)}행, 조사자료 {len(survey)}행. "
+            "조사자료의 행을 삽입·삭제·정렬하면 위치 조인이 깨집니다."
+        )
     for key in ("korean_name", "scientific_name"):
-        left = master[key].map(normalize_text)
+        left = df[key]
         right = survey[key].map(normalize_text)
         mismatch = left.values != right.values
         if mismatch.any():
             first = int(mismatch.argmax())
             raise ValueError(
-                f"[{spec.name}] {key} 가 {first + 2}행에서 어긋납니다: "
+                f"[{taxon}] {key} 가 {first + 2}행에서 어긋납니다: "
                 f"마스터DB '{left.iloc[first]}' vs 조사자료 '{right.iloc[first]}'. "
                 "조사자료의 행 순서를 바꾸지 마십시오."
             )
+    for col in SURVEY_COLUMNS:
+        df[col] = survey[col].values
+    return df, warnings
+
+
+def load_taxon(
+    master_path: Path | str,
+    survey_path: Path | str,
+    taxon: str,
+) -> TaxonDataset:
+    """마스터DB와 조사자료에서 분류군 하나를 읽어 합친다.
+
+    조사자료에 `species_id` 가 있으면 그것으로 조인하고, 없으면(v6 이하)
+    행 위치로 조인한 뒤 경고를 남긴다.
+    """
+    spec = get_spec(taxon)
+    master = pd.read_excel(master_path, sheet_name=spec.name)
+    survey = pd.read_excel(survey_path, sheet_name=spec.name)
 
     df = master.copy()
     for key in ("scientific_name", "korean_name", "family_kr"):
         df[key] = df[key].map(normalize_text)
-    for col in SURVEY_COLUMNS:
-        df[col] = survey[col].values
 
-    df, warnings = _presence_columns(df, spec)
+    if "species_id" in master.columns and "species_id" in survey.columns:
+        df, warnings = _join_by_id(df, survey, spec.name)
+    else:
+        df, warnings = _join_by_position(df, survey, spec.name)
+
+    df, parse_warnings = _presence_columns(df, spec)
+    warnings += parse_warnings
 
     dup = df.duplicated(subset=["scientific_name", "korean_name"]).sum()
     if dup:

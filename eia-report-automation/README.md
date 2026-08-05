@@ -39,6 +39,7 @@ eia-report-automation/
 │   └── pipeline.py  1차 프로토타입 진입점
 ├── config/          모델·표 서식 설정
 ├── prompts/         프롬프트 템플릿
+├── tools/           원자료 정비 스크립트
 ├── tests/
 └── samples/
 ```
@@ -50,7 +51,11 @@ eia-report-automation/
 
 ```bash
 python -m src.analyze_web          # → output/analysis_report.html
+python -m tools.repair_datamaster  # 원자료 정비 (v6 → v7)
 ```
+
+원자료 3종은 `species_id` 로 연결된다. 입력지·예시데이터의 첫 컬럼이
+조인 키이며 수정·삭제·정렬하면 안 된다.
 
 | 계층 | 상태 |
 |---|---|
