@@ -27,49 +27,92 @@ LLM 에게 계산을 맡기지 않는다. 수치와 목록은 Python 이 확정�
 
 ```
 eia-report-automation/
+├── run.bat          Windows 실행 스크립트 (더블클릭)
 ├── docs/            설계 문서
 ├── src/
-│   ├── data/        스키마·로딩·검증
-│   ├── analysis/    T1/T2/T3 분석과 결과 집약
-│   ├── report_web/  분석 결과 웹페이지
-│   ├── charts/      그래프 생성
-│   ├── llm/         로컬 LLM 클라이언트·프롬프트
-│   ├── photos/      사진대지 구성
-│   ├── hwpx/        한글 문서 조판
+│   ├── data/        schema(분류군 사양·컬럼) · loader(조인·파싱)
+│   ├── analysis/    scope(분석 단위) · species_summary · diversity
+│   │                legal_status · taxon_specific · stations(정점)
+│   │                item_catalog(항목 판정) · runner(집약)
+│   ├── report_web/  payload(렌더 서술자) · builder(HTML·SVG)
+│   ├── charts/      그래프 파일 생성 (미구현)
+│   ├── llm/         로컬 LLM 클라이언트·프롬프트 (미구현)
+│   ├── photos/      사진대지 구성 (미구현)
+│   ├── hwpx/        한글 문서 조판 (미구현)
 │   ├── analyze_web.py  분석 → 웹페이지 진입점
 │   └── pipeline.py  1차 프로토타입 진입점
 ├── config/          모델·표 서식 설정
 ├── prompts/         프롬프트 템플릿
-├── tools/           원자료 정비 스크립트
+├── tools/           repair_datamaster · make_station_sample
 ├── tests/
 └── samples/
 ```
 
-## 현재 상태
+## 실행
 
-분석 계층까지 동작한다. 가상데이터 8개 분류군을 읽어 분석하고 결과를
-웹페이지로 낸다. HWPX 조판 계층은 아직 인터페이스만 있다.
+**모든 명령은 이 폴더(`eia-report-automation/`)에서 실행한다.** 모듈 경로가
+여기를 기준으로 잡히기 때문이다.
+
+Windows 는 `run.bat` 을 더블클릭하면 가상환경 생성부터 브라우저 열기까지
+한 번에 끝난다. 직접 실행하려면 아래와 같다.
 
 ```bash
-python -m src.analyze_web          # → output/analysis_report.html
-python -m tools.repair_datamaster  # 원자료 정비 (v6 → v7)
+cd eia-report-automation
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+python -m src.analyze_web              # 분석 → output/analysis_report.html
+pytest -q                              # 테스트
 ```
+
+원자료를 다시 만들어야 할 때만 쓰는 명령이다. 결과물이 이미 저장소에 있으므로
+평소에는 실행할 필요가 없다.
+
+```bash
+python -m tools.repair_datamaster      # 마스터DB 정비        (v6 → v7)
+python -m tools.make_station_sample    # 정점조사 데이터 생성  (v7 → v8)
+```
+
+두 도구 모두 시드를 고정하거나 결정론적으로 동작하므로, 언제 돌려도 같은
+결과가 나온다.
+
+## 현재 상태
+
+분석 계층과 웹 작업대까지 동작한다. HWPX 조판 계층은 아직 인터페이스만 있다.
+
+| 계층 | 상태 |
+|---|---|
+| 데이터 로딩·검증 (`species_id` 조인) | 구현 |
+| T1 공통 분석 | 구현 |
+| T2 분류군 특이 분석 | 구현 |
+| T3 군집지수 | 구현 |
+| 정점 분석 (지점별 종수·지수·유사도) | 구현 |
+| 분석 선택 웹 작업대 | 구현 |
+| 그래프 파일(PNG) 산출 | 미구현 |
+| LLM 문장 생성 | 미구현 |
+| HWPX 조판 | 미구현 |
 
 원자료 3종은 `species_id` 로 연결된다. 입력지·예시데이터의 첫 컬럼이
 조인 키이며 수정·삭제·정렬하면 안 된다.
 
-| 계층 | 상태 |
-|---|---|
-| 데이터 로딩·검증 | 구현 |
-| T1 공통 분석 | 구현 |
-| T2 분류군 특이 분석 | 구현 |
-| T3 군집지수 | 구현 |
-| 웹페이지 표출 | 구현 |
-| 그래프 생성 | 미구현 |
-| HWPX 조판 | 미구현 |
-
 한글 문서보다 웹페이지를 먼저 두는 이유는 수치 검수 비용이 훨씬 싸기
 때문이다. 웹에서 확정한 수치를 그대로 조판으로 넘긴다.
+
+### 웹 작업대
+
+분류군 → 분석 단위 → 분석항목을 고르면 표와 그래프가 나오고, 평가서에
+넣기로 한 항목이 채택 목록으로 모인다.
+
+**분석 단위**는 회차·정점 조합이다. 임의 조합을 다 계산하면 정점 5개일 때
+4,095가지가 되므로, 업무상 의미 있는 단위만 열거한다(정점 분류군 17개,
+나머지 7개로 총 76개).
+
+단위에 따라 항목 가용성이 바뀐다. 문헌 단위는 개체수가 없어 군집지수를 낼
+수 없고, 정점 하나만 고르면 지점간 비교를 할 수 없다. **낼 수 없는 항목은
+숨기지 않고 사유와 함께 비활성으로 표시한다.**
+
+그래프는 외부 라이브러리 없이 인라인 SVG 로 그린다. 화면은 사전 계산된 값을
+고르고 그릴 뿐 지수를 계산하지 않는다.
 
 ## 1차 구현 범위
 
@@ -84,12 +127,11 @@ Excel 종목록 → 출현종 체크 → 종수 계산 → 종목록 표 생성
 
 ## 실행 환경
 
-- Python 3.11 이상
-- 로컬 LLM 런타임(Ollama). 모델은 `config/model.yaml` 에서 지정한다.
-- pyhwpx 와 한글 프로그램은 Windows 환경에서만 동작한다. 데이터·분석
-  계층은 플랫폼과 무관하게 테스트할 수 있도록 조판 계층과 분리했다.
-
-```bash
-pip install -r requirements.txt
-pytest
-```
+- **Python 3.11 이상.** 그 이하에서는 타입 표기(`str | None`)가 동작하지 않는다.
+- 지금 필요한 패키지는 `pandas` 와 `openpyxl` 뿐이다. 아직 쓰지 않는 계층의
+  의존성(matplotlib · PyYAML · requests · pyhwpx)은 `requirements.txt` 에
+  주석으로 남겨 두었고, 해당 계층을 구현할 때 해제한다.
+- pyhwpx 와 한글 프로그램은 Windows 에서만 동작한다. 데이터·분석 계층은
+  플랫폼과 무관하게 테스트할 수 있도록 조판 계층과 분리했다.
+- 로컬 LLM 런타임(Ollama)은 문장 생성 계층을 붙일 때 필요하다. 모델명은
+  `config/model.yaml` 에서 관리한다.
