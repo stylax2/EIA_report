@@ -84,6 +84,54 @@ class ReportTemplate:
     def figures(self) -> list[Slot]:
         return [s for s in self.slots if s.kind in ("그림", "사진")]
 
+    @property
+    def chapter(self) -> str:
+        """이 문서의 장 번호(캡션 접두사).
+
+        동·식물상은 사업마다 7.1.1·8.1.1·9.1.1 등으로 달라진다. 다른 평가
+        매체와의 순서에 따라 정해지므로 문서에서 읽어 낼 뿐 고정하지 않는다.
+        """
+        counts: dict[str, int] = {}
+        for s in self.slots:
+            if "-" in s.number:
+                prefix = s.number.rsplit("-", 1)[0]
+                counts[prefix] = counts.get(prefix, 0) + 1
+        return max(counts, key=counts.get) if counts else ""
+
+    def renumber(self, chapter: str | None = None,
+                 merge_figures: bool = False) -> "ReportTemplate":
+        """캡션 번호를 다시 매긴다.
+
+        장 번호가 바뀌거나(9.1.1 → 7.1.1) 항목을 넣고 빼면 뒤 번호가 전부
+        밀린다. 손으로 고치면 반드시 빠뜨리므로 프로그램이 다시 매긴다.
+
+        `chapter` 를 주지 않으면 현재 장 번호를 유지한다. `merge_figures`
+        는 사진을 그림과 한 계열로 묶을지 정한다. 업체마다 관행이 다르다.
+        """
+        target = chapter or self.chapter
+        series: dict[str, int] = {}
+        renumbered: list[Slot] = []
+
+        for slot in sorted(self.slots, key=lambda s: s.order):
+            key = "그림" if (merge_figures and slot.kind == "사진") else slot.kind
+            series[key] = series.get(key, 0) + 1
+            renumbered.append(Slot(
+                kind=slot.kind,
+                number=f"{target}-{series[key]}" if target else str(series[key]),
+                title=slot.title,
+                order=slot.order,
+            ))
+
+        by_order = {s.order: s for s in renumbered}
+        headings = [
+            Heading(level=h.level, marker=h.marker, title=h.title, order=h.order,
+                    style_id=h.style_id,
+                    slots=[by_order[s.order] for s in h.slots])
+            for h in self.headings
+        ]
+        return ReportTemplate(source=self.source, headings=headings,
+                              slots=renumbered, notes=list(self.notes))
+
     def outline(self) -> str:
         """사람이 읽는 목차 문자열. 검수용."""
         lines = []
@@ -217,7 +265,8 @@ def _check(t: ReportTemplate) -> list[str]:
             labels = ", ".join(f"{s.kind} {s.number}" for s in slots)
             notes.append(
                 f"장 번호가 다른 캡션이 있습니다: {labels} "
-                f"(이 문서의 장 번호는 {dominant})")
+                f"(이 문서의 장 번호는 {dominant}). "
+                f"renumber() 로 일괄 정정할 수 있습니다.")
 
     # 번호가 연속인지 (빠진 번호는 편집 중 삭제 흔적)
     for kind in ("표", "그림"):

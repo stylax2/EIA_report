@@ -11,6 +11,7 @@ import pytest
 from src.hwpx.template import (
     _check,
     _classify,
+    Heading,
     ReportTemplate,
     Slot,
     extract_template,
@@ -87,6 +88,68 @@ def test_detects_missing_caption_number():
 
 def test_warns_when_no_heading_found():
     assert any("목차를 찾지 못했" in n for n in _check(template_with([])))
+
+
+# ── 번호 조율 ──────────────────────────────────────────────────────────
+# 동·식물상 장 번호는 사업마다 다르다(7.1.1 · 8.1.1 · 9.1.1 …). 다른 평가
+# 매체와의 순서로 정해지므로 고정하지 않고 다시 매길 수 있어야 한다.
+
+def numbered(*specs):
+    return template_with([Slot(k, n, f"제목{i}", i)
+                          for i, (k, n) in enumerate(specs, start=1)])
+
+
+def test_chapter_is_detected_from_captions():
+    t = numbered(("표", "8.1.1-1"), ("표", "8.1.1-2"), ("그림", "8.1.1-1"))
+    assert t.chapter == "8.1.1"
+
+
+def test_chapter_is_empty_without_captions():
+    assert template_with([]).chapter == ""
+
+
+def test_renumber_rebases_chapter():
+    t = numbered(("표", "9.1.1-1"), ("표", "9.1.1-2"))
+    assert [s.number for s in t.renumber("7.1.1").tables] == ["7.1.1-1", "7.1.1-2"]
+
+
+def test_renumber_keeps_series_separate():
+    t = numbered(("표", "9.1.1-1"), ("그림", "9.1.1-1"), ("표", "9.1.1-2"))
+    r = t.renumber("7.1.1")
+    assert [s.number for s in r.tables] == ["7.1.1-1", "7.1.1-2"]
+    assert [s.number for s in r.figures] == ["7.1.1-1"]
+
+
+def test_renumber_closes_gaps():
+    # 항목을 빼면 뒤 번호가 밀린다. 손으로 고치면 반드시 빠뜨린다.
+    t = numbered(("표", "9.1.1-1"), ("표", "9.1.1-3"), ("표", "9.1.1-7"))
+    assert [s.number for s in t.renumber().tables] == ["9.1.1-1", "9.1.1-2", "9.1.1-3"]
+
+
+def test_renumber_fixes_foreign_chapter_number():
+    # 다른 평가서에서 복사해 온 캡션이 제자리를 찾는다
+    t = numbered(("그림", "9.1.1-1"), ("사진", "8.1.1-1"))
+    r = t.renumber(merge_figures=True)
+    assert [s.number for s in r.figures] == ["9.1.1-1", "9.1.1-2"]
+
+
+def test_renumber_without_chapter_keeps_current():
+    t = numbered(("표", "9.1.1-5"))
+    assert t.renumber().tables[0].number == "9.1.1-1"
+
+
+def test_renumber_updates_headings_too():
+    t = numbered(("표", "9.1.1-1"))
+    t.headings.append(Heading(level=1, marker="1", title="가", order=0,
+                              slots=[t.slots[0]]))
+    r = t.renumber("7.1.1")
+    assert r.headings[0].slots[0].number == "7.1.1-1"
+
+
+def test_renumber_does_not_mutate_original():
+    t = numbered(("표", "9.1.1-1"))
+    t.renumber("7.1.1")
+    assert t.tables[0].number == "9.1.1-1"
 
 
 # ── 실제 평가서 샘플 ───────────────────────────────────────────────────
