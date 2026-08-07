@@ -6,6 +6,9 @@
 pandas>=2.2
 openpyxl>=3.1
 
+# HWPX(ZIP+XML) 템플릿 추출 (src/hwpx)
+lxml>=5.0
+
 # 테스트
 pytest>=8.0
 
