@@ -17,14 +17,35 @@ setlocal
 rem 어디서 실행하든 이 파일이 있는 폴더를 기준으로 삼는다
 cd /d "%~dp0"
 
+set "RUNBAT_VERSION=2026-08-07.2 (anaconda-detect+diag)"
+
 echo.
 echo ============================================
 echo  EIA 생태조사 분석
+echo  run.bat %RUNBAT_VERSION%
 echo ============================================
+echo.
+echo  ^(이 줄에 버전이 안 보이면 예전 run.bat 입니다.
+echo    git pull origin main 로 최신을 받으십시오.^)
+
+rem 어느 커밋을 돌리는지 보여준다. git 이 없으면 조용히 넘어간다.
+for /f "delims=" %%c in ('git -C "%~dp0.." log -1 --format^=" 커밋 %%h  %%ad  %%s" --date^=short 2^>nul') do echo %%c
 echo.
 
 set "PYDIR="
 set "PYEXE="
+
+rem ── 0) 사용자가 직접 지정한 경우 ───────────────────────────────
+rem     자동 탐색이 모두 실패할 때의 확실한 탈출구다.
+rem       set "EIA_PYTHON=C:\Users\사용자명\anaconda3\python.exe"
+if defined EIA_PYTHON (
+    if exist "%EIA_PYTHON%" (
+        for %%F in ("%EIA_PYTHON%") do set "PYDIR=%%~dpF"
+        goto :trimdir
+    )
+    echo [경고] EIA_PYTHON 에 지정한 경로가 없습니다: %EIA_PYTHON%
+    echo.
+)
 
 rem ── 1) PATH 에 python 이 있는 경우 ──────────────────────────────
 rem     Anaconda Prompt 로 실행했거나 conda 환경이 활성화된 상태
@@ -95,6 +116,10 @@ if not errorlevel 1 (
 )
 
 goto :notfound
+
+rem 경로 끝의 백슬래시를 떼어 낸다 (%%~dpF 는 항상 붙여서 준다)
+:trimdir
+if "%PYDIR:~-1%"=="\" set "PYDIR=%PYDIR:~0,-1%"
 
 rem ── 찾은 설치 폴더를 이 창에서만 PATH 에 올린다 ────────────────
 :usedir
@@ -182,6 +207,40 @@ rem ── 파이썬을 끝내 못 찾은 경우 ──────────�
 :notfound
 echo [오류] 파이썬을 찾을 수 없습니다.
 echo.
+echo ---------- 진단 정보 (이 부분을 그대로 알려주십시오) ----------
+echo run.bat 버전 : %RUNBAT_VERSION%
+echo 실행 폴더    : %~dp0
+echo CONDA_PREFIX : [%CONDA_PREFIX%]
+echo USERPROFILE  : [%USERPROFILE%]
+echo.
+echo [1] where python
+where python 2>&1
+echo [2] where conda
+where conda 2>&1
+echo [3] where py
+where py 2>&1
+echo [4] 설치 경로 점검
+for %%D in (
+  "%USERPROFILE%\anaconda3"
+  "%USERPROFILE%\Anaconda3"
+  "%USERPROFILE%\miniconda3"
+  "%USERPROFILE%\Miniconda3"
+  "%LOCALAPPDATA%\anaconda3"
+  "%LOCALAPPDATA%\Continuum\anaconda3"
+  "%ProgramData%\anaconda3"
+  "%ProgramData%\Anaconda3"
+  "%ProgramData%\miniconda3"
+  "%ProgramData%\Miniconda3"
+  "C:\Anaconda3"
+  "C:\Miniconda3"
+) do (
+    if exist "%%~D\python.exe" (echo   O  %%~D) else (echo   -  %%~D)
+)
+echo [5] 레지스트리
+reg query "HKCU\Software\Python\ContinuumAnalytics" /s /f InstallPath 2^>nul | findstr /i "InstallPath REG_SZ"
+reg query "HKLM\Software\Python\ContinuumAnalytics" /s /f InstallPath 2^>nul | findstr /i "InstallPath REG_SZ"
+echo ---------------------------------------------------------------
+echo.
 echo   아나콘다(Anaconda/Miniconda)가 설치되어 있다면, 설치 위치가
 echo   일반적이지 않아 자동 탐색에 걸리지 않은 것입니다.
 echo   아래 두 방법 중 하나를 쓰십시오.
@@ -191,7 +250,11 @@ echo       시작 메뉴 - Anaconda Prompt 를 열고
 echo           cd /d "%~dp0"
 echo           run.bat
 echo.
-echo   [방법 2] 설치 폴더를 직접 지정
+echo   [방법 2] python.exe 를 직접 지정 ^(가장 확실^)
+echo       set "EIA_PYTHON=C:\Users\사용자명\anaconda3\python.exe"
+echo       run.bat
+echo.
+echo   [방법 3] 설치 폴더를 직접 지정
 echo       아나콘다 설치 폴더^(python.exe 가 있는 곳^)를 확인한 뒤
 echo       명령창에서 아래처럼 실행하십시오.
 echo           set "CONDA_PREFIX=C:\Users\사용자명\anaconda3"
