@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..analysis.runner import TaxonResult
-from .payload import build_payload
+from .payload import build_payload, template_payload
 
 SPECIES_PAGE = 100
 
@@ -87,10 +87,45 @@ h1{font-size:1.42rem;margin:0 0 5px;letter-spacing:-.01em;text-wrap:balance}
 .banner{background:var(--warn-soft);border:1px solid var(--warn);color:var(--warn);
   border-radius:4px;padding:8px 13px;font-size:.78rem;font-weight:600}
 
-.shell{max-width:1240px;margin:0 auto;display:grid;
-  grid-template-columns:196px minmax(0,1fr);gap:26px;
-  padding:24px clamp(16px,4vw,40px) 70px}
-@media (max-width:900px){.shell{grid-template-columns:1fr;gap:16px}}
+.shell{max-width:1680px;margin:0 auto;display:grid;
+  grid-template-columns:176px minmax(0,1fr) minmax(360px,0.78fr);gap:20px;
+  padding:20px clamp(14px,3vw,32px) 70px;align-items:start}
+@media (max-width:1400px){.shell{grid-template-columns:176px minmax(0,1fr)}
+  .preview-col{grid-column:1/-1}}
+@media (max-width:900px){.shell{grid-template-columns:1fr;gap:14px}}
+
+/* ── 보고서 미리보기 (우측) ── */
+.preview-col{position:sticky;top:18px;display:flex;flex-direction:column;gap:14px}
+@media (max-width:1400px){.preview-col{position:static}}
+.preview-head{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
+.preview-head h3{margin:0}
+.chapter-tag{font-family:Menlo,monospace;font-size:.74rem;background:var(--moss-soft);
+  color:var(--moss);padding:2px 7px;border-radius:3px;font-weight:700}
+.preview-src{font-size:.72rem;color:var(--ink-3);word-break:break-all}
+.progress{display:flex;align-items:center;gap:9px;margin:10px 0 4px}
+.progress-bar{flex:1;height:7px;background:var(--surface-2);border-radius:4px;overflow:hidden}
+.progress-fill{height:100%;background:var(--moss);border-radius:4px;transition:width .18s}
+.progress-text{font-family:Menlo,monospace;font-size:.75rem;color:var(--ink-2);
+  font-variant-numeric:tabular-nums;white-space:nowrap}
+.outline{max-height:min(66vh,720px);overflow-y:auto;overflow-x:hidden;
+  border-top:1px solid var(--line-2);margin-top:9px}
+.o-head{font-weight:700;color:var(--ink);padding:9px 0 3px;line-height:1.4}
+.o-head.lv2{font-size:.83rem;font-weight:600;color:var(--ink-2)}
+.o-head.lv3{font-size:.79rem;font-weight:500;color:var(--ink-2)}
+.o-head.lv4{font-size:.77rem;font-weight:400;color:var(--ink-3)}
+.o-slot{display:flex;align-items:center;gap:7px;padding:5px 0 5px 8px;
+  border-left:2px solid var(--line);margin:2px 0 2px 4px}
+.o-slot.filled{border-left-color:var(--moss);background:var(--moss-soft)}
+.o-kind{font-size:.68rem;font-weight:700;color:var(--ink-3);white-space:nowrap}
+.o-slot.filled .o-kind{color:var(--moss)}
+.o-num{font-family:Menlo,monospace;font-size:.7rem;color:var(--ink-3);white-space:nowrap}
+.o-title{font-size:.76rem;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;flex:1;min-width:0}
+.o-pick{max-width:150px;font:inherit;font-size:.71rem;padding:2px 4px;
+  border:1px solid var(--line);border-radius:3px;background:var(--paper);color:var(--ink-2)}
+.o-pick.set{border-color:var(--moss);color:var(--moss);font-weight:600}
+.unbound{margin-top:11px;padding-top:10px;border-top:1px solid var(--line-2)}
+.unbound h4{margin:0 0 6px}
 
 nav.rail{position:sticky;top:18px;align-self:start}
 @media (max-width:900px){nav.rail{position:static}}
@@ -235,7 +270,8 @@ footer .inner{max-width:1240px;margin:0 auto}
 JS = r"""
 (function(){
   var D = window.__DATA__, CFG = window.__CFG__;
-  var state = {taxon:null, scope:null, items:new Set(), adopted:new Map(), species:{}};
+  var state = {taxon:null, scope:null, items:new Set(), adopted:new Map(),
+               bind:new Map()};   // bind: 슬롯ID → 채택키
   var $ = function(s,r){return (r||document).querySelector(s);};
 
   function esc(s){var d=document.createElement('span');d.textContent=s==null?'':s;return d.innerHTML;}
@@ -523,32 +559,94 @@ JS = r"""
     });
   }
 
-  function renderAdopted(){
-    var box=$('#adopted'), list=el('div','adopted-list');
-    box.innerHTML='';
-    if(!state.adopted.size){
-      box.appendChild(el('p','empty','항목 카드의 "평가서 반영"을 체크하면 여기에 모입니다.'));
-      $('#copy').value='';
-      $('#adopted-count').textContent='0건';
-      return;
-    }
-    var lines=[];
-    state.adopted.forEach(function(v,k){
-      var row=el('div','adopted-row',
-        '<span class="tier">'+esc(v.code)+'</span><strong>'+esc(v.name)+'</strong>'+
-        '<span class="где">'+esc(v.taxon)+' · '+esc(v.scope)+'</span>'+
-        '<span class="marks"><span class="'+markCls(v.table)+'">'+v.table+'</span>'+
-        '<span class="'+markCls(v.graph)+'">'+v.graph+'</span></span>');
-      var rm=el('button','rm','제거'); rm.type='button';
-      rm.addEventListener('click',function(){ state.adopted.delete(k); renderAdopted(); renderResults();});
-      row.appendChild(rm); list.appendChild(row);
-      lines.push([v.taxon,v.scope,v.code,v.name,
-        '표 '+v.table,'그래프 '+v.graph].join('\t'));
-    });
-    box.appendChild(list);
-    $('#copy').value='분류군\t분석단위\t코드\t항목\t표\t그래프\n'+lines.join('\n');
-    $('#adopted-count').textContent=state.adopted.size+'건';
+  /* ── 보고서 미리보기 (우측) ────────────────────────────────── */
+  function adoptedList(){
+    var out=[]; state.adopted.forEach(function(v,k){ out.push([k,v]); }); return out;
   }
+
+  function renderPreview(){
+    var T=window.__TEMPLATE__;
+    if(!T){ return; }
+    var adopted=adoptedList();
+    var used=new Set(); state.bind.forEach(function(k){ used.add(k); });
+
+    // 사라진 채택 항목을 가리키는 배정은 정리한다
+    state.bind.forEach(function(key,slotId){
+      if(!state.adopted.has(key)) state.bind.delete(slotId);
+    });
+
+    var box=$('#outline'); box.innerHTML='';
+    var slotCount=0, filled=0;
+    T.rows.forEach(function(r){
+      if(r.type==='heading'){
+        box.appendChild(el('div','o-head lv'+r.level, esc(r.title)));
+        return;
+      }
+      slotCount++;
+      var bound=state.bind.get(r.id);
+      if(bound) filled++;
+      var row=el('div','o-slot'+(bound?' filled':''));
+      row.appendChild(el('span','o-kind',esc(r.kind)));
+      row.appendChild(el('span','o-num',esc(r.number)));
+      row.appendChild(el('span','o-title',esc(r.title)));
+
+      var sel=el('select','o-pick'+(bound?' set':''));
+      sel.setAttribute('aria-label',r.kind+' '+r.number+' 배정');
+      var opt=el('option',null,'— 비어 있음'); opt.value=''; sel.appendChild(opt);
+      adopted.forEach(function(pair){
+        var k=pair[0], v=pair[1];
+        if(used.has(k) && k!==bound) return;      // 이미 다른 자리에 배정됨
+        var o=el('option',null,esc(v.name+' · '+v.taxon+' · '+v.scope));
+        o.value=k; if(k===bound) o.selected=true;
+        sel.appendChild(o);
+      });
+      sel.addEventListener('change',function(){
+        if(sel.value) state.bind.set(r.id, sel.value); else state.bind.delete(r.id);
+        renderPreview();
+      });
+      row.appendChild(sel);
+      box.appendChild(row);
+    });
+
+    var pct = slotCount ? Math.round(filled/slotCount*100) : 0;
+    $('#progress-fill').style.width = pct+'%';
+    $('#progress-text').textContent = filled+' / '+slotCount+' 자리 ('+pct+'%)';
+
+    // 배정 대기
+    var wait=adopted.filter(function(pair){ return !used.has(pair[0]); });
+    var ub=$('#unbound'); ub.innerHTML='';
+    $('#unbound-count').textContent=wait.length+'건';
+    if(!wait.length){
+      ub.appendChild(el('p','empty', adopted.length
+        ? '모두 배정되었습니다.'
+        : '좌측 항목 카드의 "평가서 반영"을 체크하면 여기에 모입니다.'));
+    } else {
+      wait.forEach(function(pair){
+        var v=pair[1];
+        ub.appendChild(el('div','adopted-row',
+          '<span class="tier">'+esc(v.code)+'</span><strong>'+esc(v.name)+'</strong>'+
+          '<span class="где">'+esc(v.taxon)+' · '+esc(v.scope)+'</span>'));
+      });
+    }
+    buildPlan(T, slotCount, filled);
+  }
+
+  function buildPlan(T, slotCount, filled){
+    var lines=['# 평가서 작성 계획',
+               '# 템플릿: '+T.source+'  장 번호: '+(T.chapter||'-'),
+               '# 배정: '+filled+'/'+slotCount+' 자리','',
+               '자리\t제목\t분류군\t분석단위\t항목'];
+    T.rows.forEach(function(r){
+      if(r.type!=='slot') return;
+      var k=state.bind.get(r.id);
+      var v=k?state.adopted.get(k):null;
+      lines.push([r.kind+' '+r.number, r.title,
+                  v?v.taxon:'', v?v.scope:'', v?v.name:'(미배정)'].join('\t'));
+    });
+    $('#copy').value=lines.join('\n');
+  }
+
+  function renderAdopted(){ renderPreview(); }
 
   function renderAll(){ renderRail(); renderScopes(); renderItems(); renderResults(); }
 
@@ -569,15 +667,24 @@ JS = r"""
     var b=$('#copy-btn'); b.textContent='복사됨'; setTimeout(function(){b.textContent='복사';},1400);
   });
 
+  var T=window.__TEMPLATE__;
+  if(T){
+    $('#chapter-tag').textContent = T.chapter || '장 번호 미상';
+    $('#preview-src').textContent = T.source + '  ·  목차 ' + T.counts.heading +
+      ' · 표 ' + T.counts['표'] + ' · 그림 ' + T.counts['그림'] +
+      (T.counts['사진'] ? ' · 사진 ' + T.counts['사진'] : '');
+  }
   state.taxon=Object.keys(D)[0]; state.scope='all';
-  renderAll(); renderAdopted();
+  renderAll(); renderPreview();
 })();
 """
 
 
-def build_body(results: list[TaxonResult], master_path: str, survey_path: str) -> str:
+def build_body(results: list[TaxonResult], master_path: str, survey_path: str,
+               template=None) -> str:
     """`<body>` 안에 들어갈 내용만 만든다(style·script 포함)."""
     payload = build_payload(results)
+    tpl = template_payload(template) if template is not None else None
     generated = datetime.now().strftime("%Y-%m-%d %H:%M")
     cfg = {"OK": "○", "LIMITED": "△", "NONE": "✗", "PAGE": SPECIES_PAGE}
 
@@ -624,14 +731,32 @@ def build_body(results: list[TaxonResult], master_path: str, survey_path: str) -
 
     <div id="results"></div>
 
-    <section class="panel">
-      <h3>채택 목록 <span class="tier" id="adopted-count">0건</span></h3>
-      <p class="hint">평가서에 넣기로 한 항목입니다. 아래 텍스트를 복사해 작성 계획에 쓰십시오.</p>
-      <div id="adopted"></div>
-      <div class="toolbar"><button class="btn" type="button" id="copy-btn">복사</button></div>
-      <textarea class="copy-area" id="copy" readonly aria-label="채택 목록 복사용"></textarea>
-    </section>
   </main>
+
+  <aside class="preview-col" aria-label="보고서 미리보기">
+    <section class="panel">
+      <div class="preview-head">
+        <h3>보고서 미리보기</h3>
+        <span class="chapter-tag" id="chapter-tag"></span>
+      </div>
+      <p class="preview-src" id="preview-src"></p>
+      <p class="hint">기존 평가서에서 뽑은 목차입니다. 좌측에서 채택한 항목을
+         표·그림 자리에 배정하면 작성 현황이 채워집니다.</p>
+      <div class="progress">
+        <span class="progress-bar"><span class="progress-fill" id="progress-fill"></span></span>
+        <span class="progress-text" id="progress-text"></span>
+      </div>
+      <div class="outline" id="outline"></div>
+      <div class="unbound">
+        <h4>배정 대기 <span class="tier" id="unbound-count">0건</span></h4>
+        <div id="unbound"></div>
+      </div>
+      <div class="toolbar" style="margin-top:11px">
+        <button class="btn" type="button" id="copy-btn">작성 계획 복사</button>
+      </div>
+      <textarea class="copy-area" id="copy" readonly aria-label="작성 계획 복사용"></textarea>
+    </section>
+  </aside>
 </div>
 
 <footer><div class="inner">
@@ -640,13 +765,15 @@ def build_body(results: list[TaxonResult], master_path: str, survey_path: str) -
 </div></footer>
 
 <script>window.__CFG__={json.dumps(cfg, ensure_ascii=False)};
+window.__TEMPLATE__={json.dumps(tpl, ensure_ascii=False, separators=(",", ":"))};
 window.__DATA__={json.dumps(payload, ensure_ascii=False, separators=(",", ":"))};</script>
 <script>{JS}</script>"""
 
 
-def build_html(results: list[TaxonResult], master_path: str, survey_path: str) -> str:
+def build_html(results: list[TaxonResult], master_path: str, survey_path: str,
+               template=None) -> str:
     """브라우저로 바로 여는 자체 완결형 HTML 문서."""
-    body = build_body(results, master_path, survey_path)
+    body = build_body(results, master_path, survey_path, template)
     return f"""<!doctype html>
 <html lang="ko">
 <head>
@@ -661,7 +788,8 @@ def build_html(results: list[TaxonResult], master_path: str, survey_path: str) -
 
 
 def write_report(results: list[TaxonResult], out_path: Path | str,
-                 master_path: str, survey_path: str, fragment: bool = False) -> Path:
+                 master_path: str, survey_path: str, fragment: bool = False,
+                 template=None) -> Path:
     """HTML 파일로 저장한다.
 
     fragment=True 면 문서 골격 없이 내용만 쓴다. 게시 시 골격을 감싸주는
@@ -670,5 +798,5 @@ def write_report(results: list[TaxonResult], out_path: Path | str,
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     build = build_body if fragment else build_html
-    out.write_text(build(results, master_path, survey_path), encoding="utf-8")
+    out.write_text(build(results, master_path, survey_path, template), encoding="utf-8")
     return out

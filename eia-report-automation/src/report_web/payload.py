@@ -308,3 +308,40 @@ def taxon_payload(result: TaxonResult) -> dict:
 
 def build_payload(results: list[TaxonResult]) -> dict:
     return {r.spec.code: taxon_payload(r) for r in results}
+
+
+def template_payload(template) -> dict:
+    """보고서 템플릿을 우측 미리보기용 구조로 바꾼다.
+
+    목차 순서대로 제목과 자리(표·그림)를 늘어놓는다. 어느 자리에 무엇을
+    넣을지는 화면에서 사용자가 정하므로, 여기서는 자리만 만들어 준다.
+    """
+    rows: list[dict] = []
+    for heading in template.headings:
+        rows.append({
+            "type": "heading",
+            "level": heading.level,
+            "title": heading.title,
+            "order": heading.order,
+        })
+        for slot in heading.slots:
+            rows.append({
+                "type": "slot",
+                "kind": slot.kind,
+                "number": slot.number,
+                "title": slot.title,
+                "order": slot.order,
+                "id": f"{slot.kind}:{slot.number}",
+            })
+    return {
+        "source": template.source,
+        "chapter": template.chapter,
+        "rows": rows,
+        "counts": {
+            "heading": len(template.headings),
+            "표": len(template.tables),
+            "그림": len([s for s in template.figures if s.kind == "그림"]),
+            "사진": len([s for s in template.figures if s.kind == "사진"]),
+        },
+        "notes": list(template.notes),
+    }
